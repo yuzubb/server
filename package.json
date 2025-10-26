@@ -1,0 +1,22 @@
+{
+  "name": "invidious-proxy-server",
+  "version": "1.0.0",
+  "description": "Invidious instances fallback server for high-quality, audio-less video streams.",
+  "main": "server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "node-fetch": "^3.3.2"
+  },
+  "keywords": [
+    "invidious",
+    "youtube",
+    "proxy",
+    "express"
+  ],
+  "author": "",
+  "license": "ISC"
+}
