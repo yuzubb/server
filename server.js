@@ -76,12 +76,12 @@ async function getHighestQualityNoAudioUrl(videoId) {
     return null;
 }
 
-app.get('/api/v1/videos/:id', async (req, res) => {
+app.get('/high/:id', async (req, res) => {
     const videoId = req.params.id;
 
     if (!videoId) {
         return res.status(400).json({ 
-            error: 'videoIdが必要だよ。/api/v1/videos/:id の形式でリクエストしてね。' 
+            error: 'videoIdが必要だよ。/high/:id の形式でリクエストしてね。' 
         });
     }
 
