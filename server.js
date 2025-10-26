@@ -1,8 +1,13 @@
 import fetch from 'node-fetch';
+import express from 'express';
+
+const app = express();
+const PORT = process.env.PORT || 3000;
+
 const INVIDIOUS_INSTANCES = [
     'https://invidious.f5.si',
     'https://yt.omada.cafe',
-    'https://inv.perditum.com', 
+    'https://inv.perditum.com',
     'https://iv.melmac.space',
     'https://invidious.nikkosphere.com',
     'https://iv.duti.dev',
@@ -10,39 +15,38 @@ const INVIDIOUS_INSTANCES = [
     'https://inv.antopie.org',
     'https://lekker.gay',
 ];
-export default async function handler(req, res) {
-    const videoId = req.query.id;
 
-    if (!videoId) {
-        return res.status(400).json({ error: '/high/:id の形式でリクエストしてください。' });
-    }
+const TARGET_ITAGS = ['303', '299'];
 
-    const TARGET_ITAGS = ['303', '299']; 
-
+async function getHighestQualityNoAudioUrl(videoId) {
     for (const baseUrl of INVIDIOUS_INSTANCES) {
         const apiUrl = `${baseUrl}/api/v1/videos/${videoId}`;
 
         try {
-            console.log(`Trying instance: ${apiUrl}`);
+            console.log(`[${videoId}] インスタンス試してみるよ: ${baseUrl}`);
             
-            const response = await fetch(apiUrl, { timeout: 5000 }); 
+            const response = await fetch(apiUrl, { timeout: 7000 }); 
 
             if (!response.ok) {
-                console.warn(`Instance ${baseUrl} returned status ${response.status}`);
+                console.warn(`[${videoId}] ${baseUrl} がステータス ${response.status} 返してきた。ダメだね。`);
                 continue;
             }
 
             const data = await response.json();
             
-            if (data && data.videoId === videoId) {
+            if (data && data.videoId === videoId && data.adaptiveFormats) {
                 
-                const targetFormat = data.adaptiveFormats.find(format => 
-                    TARGET_ITAGS.includes(format.itag)
-                );
+                const targetFormat = data.adaptiveFormats
+                    .filter(format => TARGET_ITAGS.includes(format.itag))
+                    .sort((a, b) => {
+                        const resA = parseInt(a.resolution?.replace('p', '')) || 0;
+                        const resB = parseInt(b.resolution?.replace('p', '')) || 0;
+                        return resB - resA;
+                    })[0]; 
 
                 if (targetFormat) {
-                    console.log(`Found itag ${targetFormat.itag} from ${baseUrl}`);
-                    return res.status(200).json({
+                    console.log(`[${videoId}] ${baseUrl} から itag ${targetFormat.itag} 見つけたよ！`);
+                    return {
                         success: true,
                         videoId: videoId,
                         instance: baseUrl,
@@ -50,22 +54,49 @@ export default async function handler(req, res) {
                         itag: targetFormat.itag,
                         qualityLabel: targetFormat.qualityLabel,
                         resolution: targetFormat.resolution,
-                    });
+                        container: targetFormat.container,
+                        encoding: targetFormat.encoding
+                    };
                 } else {
-                    console.log(`${baseUrl} このインスタンスには必要なitagがなかったっぽい(⁠ ⁠；⁠∀⁠；⁠)). よっしゃ次実行するか！`);
-            }
-
+                    console.log(`[${videoId}] ${baseUrl} には目的のitagなかったわ。次いくよ。`);
+                }
             } else {
-                console.warn(`このインスタンスが不正なデータを送信したよ ${baseUrl} た、多分ね💦`);
+                console.warn(`[${videoId}] ${baseUrl} のデータ、なんか変だよ。`);
             }
 
         } catch (error) {
-            console.error(`このインスタンスだめだね ${baseUrl}:`, error.message);
+            console.error(`[${videoId}] ${baseUrl} でエラー発生: ${error.message}`);
         }
     }
 
-    return res.status(404).json({ 
-        success: false, 
-        error: `えらー` 
-    });
+    return null;
 }
+
+app.get('/api/v1/videos/:id', async (req, res) => {
+    const videoId = req.params.id;
+
+    if (!videoId) {
+        return res.status(400).json({ 
+            error: 'videoIdが要るよ！/api/v1/videos/:id の形式でリクエストしてね。' 
+        });
+    }
+
+    const result = await getHighestQualityNoAudioUrl(videoId);
+
+    if (result) {
+        return res.status(200).json(result);
+    } else {
+        return res.status(404).json({ 
+            success: false, 
+            error: `動画ID ${videoId} のストリーム、どれ探しても見つからなかったわ。` 
+        });
+    }
+});
+
+app.get('/', (req, res) => {
+    res.status(200).send('Invidiousプロキシ動いてるよ。/api/v1/videos/:id を使って動画データを取得してね。');
+});
+
+app.listen(PORT, () => {
+    console.log(`サーバー、ポート ${PORT} で聞いてるよ。`);
+});
