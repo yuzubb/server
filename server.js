@@ -4,6 +4,10 @@ import express from 'express';
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// キャッシュ設定 (インメモリMapを使用)
+const videoCache = new Map();
+const CACHE_DURATION_MS = 4 * 60 * 60 * 1000; // 4時間 (ミリ秒)
+
 const INVIDIOUS_INSTANCES = [
     'https://invidious.f5.si',
     'https://yt.omada.cafe',
@@ -23,12 +27,12 @@ async function getHighestQualityNoAudioUrl(videoId) {
         const apiUrl = `${baseUrl}/api/v1/videos/${videoId}`;
 
         try {
-            console.log(`[${videoId}] インスタンス試してみるよ: ${baseUrl}`);
+            console.log(`[${videoId}] インスタンス試すよ: ${baseUrl}`);
             
             const response = await fetch(apiUrl, { timeout: 7000 }); 
 
             if (!response.ok) {
-                console.warn(`[${videoId}] ${baseUrl} がステータス ${response.status} 返してきた。ダメだね。`);
+                console.warn(`[${videoId}] ${baseUrl}から${response.status}って返ってきたわ。次行くね`);
                 continue;
             }
 
@@ -45,7 +49,7 @@ async function getHighestQualityNoAudioUrl(videoId) {
                     })[0]; 
 
                 if (targetFormat) {
-                    console.log(`[${videoId}] ${baseUrl} から itag ${targetFormat.itag} 見つけたよ！`);
+                    console.log(`[${videoId}] やった！itag ${targetFormat.itag}を${baseUrl}で見つけたよ`);
                     return {
                         success: true,
                         videoId: videoId,
@@ -58,14 +62,14 @@ async function getHighestQualityNoAudioUrl(videoId) {
                         encoding: targetFormat.encoding
                     };
                 } else {
-                    console.log(`[${videoId}] ${baseUrl} には目的のitagなかったわ。次いくよ。`);
+                    console.log(`[${videoId}] ${baseUrl}にはitagが無かったわ。次行くわ`);
                 }
             } else {
-                console.warn(`[${videoId}] ${baseUrl} のデータ、なんか変だよ。`);
+                console.warn(`[${videoId}] ${baseUrl}から変なデータ返ってきたわ`);
             }
 
         } catch (error) {
-            console.error(`[${videoId}] ${baseUrl} でエラー発生: ${error.message}`);
+            console.error(`[${videoId}] ${baseUrl}でエラー出た: ${error.message}`);
         }
     }
 
@@ -77,26 +81,40 @@ app.get('/api/v1/videos/:id', async (req, res) => {
 
     if (!videoId) {
         return res.status(400).json({ 
-            error: 'videoIdが要るよ！/api/v1/videos/:id の形式でリクエストしてね。' 
+            error: 'videoIdが必要だよ。/api/v1/videos/:id の形式でリクエストしてね。' 
         });
+    }
+
+    const cachedItem = videoCache.get(videoId);
+    
+    if (cachedItem && cachedItem.expiry > Date.now()) {
+        console.log(`[${videoId}] キャッシュヒット！4時間以内だから即返すわ`);
+        return res.status(200).json(cachedItem.data);
     }
 
     const result = await getHighestQualityNoAudioUrl(videoId);
 
     if (result) {
+        videoCache.set(videoId, {
+            data: result,
+            expiry: Date.now() + CACHE_DURATION_MS
+        });
+        console.log(`[${videoId}] 新しい結果をキャッシュに保存したよ。4時間有効ね`);
+
         return res.status(200).json(result);
     } else {
         return res.status(404).json({ 
             success: false, 
-            error: `動画ID ${videoId} のストリーム、どれ探しても見つからなかったわ。` 
+            error: `動画ID ${videoId} のストリームはどこにも無かったよ。` 
         });
     }
 });
 
 app.get('/', (req, res) => {
-    res.status(200).send('Invidiousプロキシ動いてるよ。/api/v1/videos/:id を使って動画データを取得してね。');
+    res.status(200).send('Invidious Proxyは動いてるよ。動画データが欲しいなら /api/v1/videos/:id を使ってね。');
 });
 
+
 app.listen(PORT, () => {
-    console.log(`サーバー、ポート ${PORT} で聞いてるよ。`);
+    console.log(`サーバーはポート${PORT}で起動したよ！`);
 });
