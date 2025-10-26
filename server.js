@@ -20,7 +20,7 @@ const INVIDIOUS_INSTANCES = [
     'https://lekker.gay',
 ];
 
-const TARGET_ITAGS = ['18'];
+const TARGET_ITAGS = ['303','299'];
 
 async function getHighestQualityNoAudioUrl(videoId) {
     for (const baseUrl of INVIDIOUS_INSTANCES) {
