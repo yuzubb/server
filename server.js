@@ -111,7 +111,7 @@ app.get('/high/:id', async (req, res) => {
 });
 
 app.get('/', (req, res) => {
-    res.status(200).send('Invidious Proxyは動いてるよ。動画データが欲しいなら /api/v1/videos/:id を使ってね。');
+    res.status(200).send('Invidious Proxyは動いてるよ。動画データが欲しいなら /high/:id を使ってね。');
 });
 
 
