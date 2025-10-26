@@ -4,7 +4,6 @@ import express from 'express';
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// キャッシュ設定 (インメモリMapを使用)
 const videoCache = new Map();
 const CACHE_DURATION_MS = 4 * 60 * 60 * 1000; // 4時間 (ミリ秒)
 
@@ -20,11 +19,13 @@ const INVIDIOUS_INSTANCES = [
     'https://lekker.gay',
 ];
 
-const TARGET_ITAGS = ['303','299'];
+// 取得したいitagのリスト。今回は全てを探すよ。
+const TARGET_ITAGS = ['18', '303', '299'];
 
-async function getHighestQualityNoAudioUrl(videoId) {
+async function getAllTargetFormats(videoId) {
     for (const baseUrl of INVIDIOUS_INSTANCES) {
         const apiUrl = `${baseUrl}/api/v1/videos/${videoId}`;
+        const foundFormats = [];
 
         try {
             console.log(`[${videoId}] インスタンス試すよ: ${baseUrl}`);
@@ -38,31 +39,45 @@ async function getHighestQualityNoAudioUrl(videoId) {
 
             const data = await response.json();
             
-            if (data && data.videoId === videoId && data.adaptiveFormats) {
+            if (data && data.videoId === videoId) {
                 
-                const targetFormat = data.adaptiveFormats
-                    .filter(format => TARGET_ITAGS.includes(format.itag))
-                    .sort((a, b) => {
-                        const resA = parseInt(a.resolution?.replace('p', '')) || 0;
-                        const resB = parseInt(b.resolution?.replace('p', '')) || 0;
-                        return resB - resA;
-                    })[0]; 
+                // adaptiveFormats (音声なし) と formatStreams (音声あり) を結合
+                const allFormats = [
+                    ...(data.adaptiveFormats || []), 
+                    ...(data.formatStreams || [])
+                ];
 
-                if (targetFormat) {
-                    console.log(`[${videoId}] やった！itag ${targetFormat.itag}を${baseUrl}で見つけたよ`);
+                // 全てのターゲットitagをチェック
+                for (const targetItag of TARGET_ITAGS) {
+                    const format = allFormats.find(f => f.itag === targetItag);
+                    
+                    if (format) {
+                        // formatStreamsとadaptiveFormatsのプロパティの違いを吸収してデータを整形
+                        const isAdaptive = (format.audioQuality || format.audioSampleRate);
+                        
+                        foundFormats.push({
+                            videoUrl: format.url,
+                            itag: format.itag,
+                            qualityLabel: format.qualityLabel || format.quality,
+                            resolution: format.resolution,
+                            container: format.container,
+                            encoding: format.encoding,
+                            audioIncluded: !isAdaptive
+                        });
+                    }
+                }
+                
+                // 目的のフォーマットが1つでも見つかったら、このインスタンスの結果を採用して終了
+                if (foundFormats.length > 0) {
+                    console.log(`[${videoId}] やった！${baseUrl}でitag ${foundFormats.map(f => f.itag).join(', ')}を見つけたよ`);
                     return {
                         success: true,
                         videoId: videoId,
                         instance: baseUrl,
-                        videoUrl: targetFormat.url,
-                        itag: targetFormat.itag,
-                        qualityLabel: targetFormat.qualityLabel,
-                        resolution: targetFormat.resolution,
-                        container: targetFormat.container,
-                        encoding: targetFormat.encoding
+                        formats: foundFormats
                     };
                 } else {
-                    console.log(`[${videoId}] ${baseUrl}にはitagが無かったわ。次行くわ`);
+                    console.log(`[${videoId}] ${baseUrl}には目的のitag(${TARGET_ITAGS.join(', ')})が無かったわ。次行くわ`);
                 }
             } else {
                 console.warn(`[${videoId}] ${baseUrl}から変なデータ返ってきたわ`);
@@ -76,12 +91,12 @@ async function getHighestQualityNoAudioUrl(videoId) {
     return null;
 }
 
-app.get('/high/:id', async (req, res) => {
+app.get('/stream/:id', async (req, res) => {
     const videoId = req.params.id;
 
     if (!videoId) {
         return res.status(400).json({ 
-            error: 'videoIdが必要だよ。/high/:id の形式でリクエストしてね。' 
+            error: 'videoIdが必要だよ。/stream/:id の形式でリクエストしてね。' 
         });
     }
 
@@ -92,7 +107,7 @@ app.get('/high/:id', async (req, res) => {
         return res.status(200).json(cachedItem.data);
     }
 
-    const result = await getHighestQualityNoAudioUrl(videoId);
+    const result = await getAllTargetFormats(videoId);
 
     if (result) {
         videoCache.set(videoId, {
@@ -111,7 +126,7 @@ app.get('/high/:id', async (req, res) => {
 });
 
 app.get('/', (req, res) => {
-    res.status(200).send('Invidious Proxyは動いてるよ。動画データが欲しいなら /high/:id を使ってね。');
+    res.status(200).send('Invidious Proxyは動いてるよ。動画データが欲しいなら /stream/:id を使ってね。');
 });
 
 
