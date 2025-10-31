@@ -18,40 +18,57 @@ const INVIDIOUS_INSTANCES = [
     'https://lekker.gay',
 ];
 
-// /stream/ で使用: 18 は getAllTargetFormats 内で特別に優先されるため、リストから除外する
-const TARGET_ITAGS_ALL_OTHER = [
-    '22', '248', '271', '313', '315', '272',  // 動画 (複合と分離)
-    '137', '299', '399', '264', '266',             // 動画 (分離)
-    '251', '250', '249', '140', '141', '258'       // 音声
-];
+// ⭐ 廃止: TARGET_ITAGS_ALL_OTHER
+// ⭐ 廃止: TARGET_ITAGS_HIGH
 
-// /high/ で使用 (複合 18, 22 を含まない、高画質分離重視の全フォーマット)
-// ⭐ 修正: 4K (313, 315, 266, 399) のitagを除外。最高で1440pまでを含むitagは残し、後続のフィルタで1080pに制限する。
-// itag 248, 271, 137, 299, 264 は 1080p を含むため残す。
-const TARGET_ITAGS_HIGH = [
-    '248', '271', '272', // 動画のみ (VP9, 1080p, 1440p)
-    '137', '299', '264', // 動画のみ (H.264, 1080p, 1440p)
-    '251', '250', '249', '140', '141', '258'  // 音声のみ (Opus/AAC)
-];
+/**
+ * Invidiousレスポンスのフォーマットオブジェクトを、より汎用的な構造に変換し、トラックタイプを判別する。
+ * @param {object} format - Invidious APIから取得した単一のフォーマットオブジェクト
+ * @returns {object} 整理されたフォーマット情報
+ */
+function normalizeFormat(format) {
+    const isAudioOnly = !!format.audioQuality && !format.resolution;
+    const isVideoOnly = !!format.resolution && !format.audioQuality;
+    const isCombined = !!format.resolution && !!format.audioQuality; // 解像度と音声品質の両方があれば複合と見なす
+
+    let trackType = 'unknown';
+    if (isAudioOnly) {
+        trackType = 'audio';
+    } else if (isVideoOnly) {
+        trackType = 'video';
+    } else if (isCombined) {
+        trackType = 'combined';
+    }
+
+    const resolution = format.resolution || (format.qualityLabel ? format.qualityLabel.match(/(\d+p)/)?.[1] : null);
+    
+    // 解像度の高さを数値で取得 (例: '1080p' -> 1080, '720p' -> 720)
+    const height = resolution ? parseInt(resolution.replace('p', '')) : 0;
+
+    return {
+        videoUrl: format.url,
+        itag: format.itag, // 情報を残すためitagは含める
+        qualityLabel: format.qualityLabel || format.quality,
+        resolution: format.resolution,
+        resolutionHeight: height,
+        container: format.container,
+        encoding: format.encoding,
+        trackType: trackType,
+        audioQuality: format.audioQuality // 音声トラック選定のため含める
+    };
+}
+
 
 // ----------------------------------------------------
-// getAllTargetFormats 関数
+// getAllFormats 関数 (itagに依存しないように変更)
 // ----------------------------------------------------
 /**
- * Invidiousインスタンスを巡回し、指定されたitagのフォーマットを取得する。
- * /stream/からの呼び出しではitag '18'を最優先する。
+ * Invidiousインスタンスを巡回し、利用可能な全てのフォーマットを正規化して取得する。
  */
-async function getAllTargetFormats(videoId, targetItags) {
-    
-    // /stream/ のリクエストでのみ '18' を最優先するフラグ
-    const prioritizeItag18 = targetItags === TARGET_ITAGS_ALL_OTHER; 
-    
-    // 検索するタグのリスト
-    let searchItags = prioritizeItag18 ? targetItags : targetItags;
+async function getAllFormats(videoId) {
 
     for (const baseUrl of INVIDIOUS_INSTANCES) {
         const apiUrl = `${baseUrl}/api/v1/videos/${videoId}`;
-        const foundFormats = [];
 
         try {
             console.log(`[${videoId}] インスタンス試すよ: ${baseUrl}`);
@@ -76,94 +93,22 @@ async function getAllTargetFormats(videoId, targetItags) {
                     ...(data.formatStreams || [])
                 ];
 
-                // ⭐ /stream/ 優先処理 1: '18' が見つかったら即座にそれを返す
-                if (prioritizeItag18) {
-                    const itag18Format = allFormats.find(f => f.itag === '18');
-                    if (itag18Format) {
-                         const isCombined = itag18Format.itag === '18';
-                        foundFormats.push({
-                            videoUrl: itag18Format.url,
-                            itag: itag18Format.itag,
-                            qualityLabel: itag18Format.qualityLabel || itag18Format.quality,
-                            resolution: itag18Format.resolution,
-                            container: itag18Format.container,
-                            encoding: itag18Format.encoding,
-                            trackType: isCombined ? 'combined' : 'unknown'
-                        });
-                        console.log(`[${videoId}] やった！${baseUrl}で最優先itag '18' を見つけたよ`);
-                        return {
-                            success: true,
-                            videoId: videoId,
-                            instance: baseUrl,
-                            formats: foundFormats
-                        };
-                    }
-                }
+                // 全てのフォーマットを正規化
+                const normalizedFormats = allFormats
+                    .map(normalizeFormat)
+                    // typeが不明なものを除外
+                    .filter(f => f.trackType !== 'unknown');
                 
-                // ⭐ 優先処理 2: '18' が見つからなかった場合、または /high/ の場合は残りのタグを探す
-                const tagsToSearch = prioritizeItag18 ? searchItags : targetItags;
-                
-                for (const targetItag of tagsToSearch) { 
-                    const format = allFormats.find(f => f.itag === targetItag);
-                    
-                    if (format) {
-                        
-                        const isAudioOnly = !!format.audioQuality;
-                        const isVideoOnly = !!format.qualityLabel && !format.audioQuality;
-                        const isCombined = format.itag === '22'; // itag 22は複合トラックとして特別に扱う
-                        
-                        foundFormats.push({
-                            videoUrl: format.url,
-                            itag: format.itag,
-                            qualityLabel: format.qualityLabel || format.quality,
-                            resolution: format.resolution,
-                            container: format.container,
-                            encoding: format.encoding,
-                            // トラックタイプの判別
-                            trackType: isAudioOnly ? 'audio' : (isVideoOnly ? 'video' : (isCombined ? 'combined' : 'unknown'))
-                        });
-                    }
-                }
-                
-                if (foundFormats.length > 0) {
-                    console.log(`[${videoId}] やった！${baseUrl}でitag ${foundFormats.map(f => f.itag).join(', ')}を見つけたよ`);
+                if (normalizedFormats.length > 0) {
+                    console.log(`[${videoId}] やった！${baseUrl}で${normalizedFormats.length}個のフォーマットを見つけたよ`);
                     return {
                         success: true,
                         videoId: videoId,
                         instance: baseUrl,
-                        formats: foundFormats
+                        formats: normalizedFormats
                     };
                 } else {
-                    // /high/ の場合に備え、itag 18, 22 の複合トラックをここで探しておく (フォールバック用)
-                    if (!prioritizeItag18) {
-                        const fallbackFormats = [];
-                        const fallbackItags = ['22', '18'];
-                        for (const itag of fallbackItags) {
-                            const format = allFormats.find(f => f.itag === itag);
-                            if (format) {
-                                fallbackFormats.push({
-                                    videoUrl: format.url,
-                                    itag: format.itag,
-                                    qualityLabel: format.qualityLabel || format.quality,
-                                    resolution: format.resolution,
-                                    container: format.container,
-                                    encoding: format.encoding,
-                                    trackType: 'combined'
-                                });
-                            }
-                        }
-                        if (fallbackFormats.length > 0) {
-                            // 複合トラックがあれば、それをformatsとして返す
-                            return {
-                                success: true,
-                                videoId: videoId,
-                                instance: baseUrl,
-                                formats: fallbackFormats
-                            };
-                        }
-                    }
-
-                    console.log(`[${videoId}] ${baseUrl}には目的のitagが無かったわ。次行くわ`);
+                    console.log(`[${videoId}] ${baseUrl}には有効なフォーマットが無かったわ。次行くわ`);
                 }
             } else {
                 console.warn(`[${videoId}] ${baseUrl}から変なデータ返ってきたわ`);
@@ -178,7 +123,7 @@ async function getAllTargetFormats(videoId, targetItags) {
 }
 
 // ----------------------------------------------------
-// /stream/:id エンドポイント
+// /stream/:id エンドポイント (互換性/18相当を優先)
 // ----------------------------------------------------
 app.get('/stream/:id', async (req, res) => {
     const videoId = req.params.id;
@@ -189,21 +134,50 @@ app.get('/stream/:id', async (req, res) => {
         });
     }
 
-    // TARGET_ITAGS_ALL_OTHER を渡し、関数内で '18' を最優先させる
-    const result = await getAllTargetFormats(videoId, TARGET_ITAGS_ALL_OTHER);
+    const result = await getAllFormats(videoId);
     
-    if (result) {
-        return res.status(200).json(result);
-    } else {
+    if (!result) {
         return res.status(404).json({ 
             success: false, 
             error: `動画ID ${videoId} のストリームはどこにも無かったよ。` 
         });
     }
+
+    const { formats } = result;
+    
+    // ⭐ 互換性優先ロジック:
+    // 1. 複合トラック ('combined') の中から、最も広く互換性のある (例: 360p) トラックを探す。
+    const combinedTracks = formats.filter(f => f.trackType === 'combined');
+    
+    let bestCombined = null;
+
+    if (combinedTracks.length > 0) {
+        // 複合トラックを、解像度が低い順にソート（互換性優先のため）
+        bestCombined = combinedTracks.sort((a, b) => {
+            // 解像度の数値で昇順ソート (360p, 480p, 720p...)
+            return a.resolutionHeight - b.resolutionHeight;
+        }).find(f => f.resolutionHeight >= 360) || combinedTracks[0]; // 360p以上を優先、なければ最小のものを採用
+    }
+
+    if (bestCombined) {
+        // 互換性の高い複合トラックが見つかったら、それだけを返す
+        return res.status(200).json({
+            ...result,
+            message: "互換性を最優先し、複合トラック（360p付近）を厳選しました。",
+            formats: [bestCombined]
+        });
+    }
+
+    // 複合トラックが見つからない場合は、全てのトラックを返す（フォールバック）
+    return res.status(200).json({
+        ...result,
+        message: "複合トラックが見つからなかったため、利用可能な全てのトラックを返します。",
+        formats: formats
+    });
 });
 
 // ----------------------------------------------------
-// /high/:id エンドポイント
+// /high/:id エンドポイント (最高画質分離を優先、1080p制限)
 // ----------------------------------------------------
 app.get('/high/:id', async (req, res) => {
     const videoId = req.params.id;
@@ -214,44 +188,38 @@ app.get('/high/:id', async (req, res) => {
         });
     }
 
-    // TARGET_ITAGS_HIGH を渡す (分離トラックを探す。見つからなければ複合トラックがフォールバックとして返る可能性がある)
-    const result = await getAllTargetFormats(videoId, TARGET_ITAGS_HIGH);
+    const result = await getAllFormats(videoId);
     
     if (!result) {
-        // 分離トラックも複合トラックも全く見つからなかった場合
         return res.status(404).json({ 
             success: false, 
             error: `動画ID ${videoId} のストリームはどこにも無かったよ。` 
         });
     }
 
-    // 取得した結果をフィルタリングして厳選
-    const dataToProcess = result; 
-    const { success, videoId: resultVideoId, instance, formats } = dataToProcess;
+    const { formats, videoId: resultVideoId, instance } = result;
     
-    // 1. 分離トラック (Video/Audio) の厳選
+    // 1. 分離トラック (Video/Audio) の厳選と1080p制限
     const videoTracks = formats
         .filter(f => f.trackType === 'video')
         .filter(f => {
             // ⭐ 1080p制限フィルター: 縦解像度が1080ピクセル以下であることを確認
-            const res = f.resolution || '0x0';
-            const height = parseInt(res.split('x')[1]);
-            return height <= 1080;
+            return f.resolutionHeight > 0 && f.resolutionHeight <= 1080;
         })
         .sort((a, b) => {
             // 解像度の高いもの（1080pが最高）を優先的に選択
-            const resA = parseInt((a.resolution || '0x0').split('x')[1]);
-            const resB = parseInt((b.resolution || '0x0').split('x')[1]);
-            if (resA === resB) {
-                return parseInt(b.itag) - parseInt(a.itag); // 解像度が同じならitag（新しいコーデック）を優先
+            if (a.resolutionHeight !== b.resolutionHeight) {
+                return b.resolutionHeight - a.resolutionHeight; 
             }
-            return resB - resA; // 解像度（例: 1080）を優先
+            // 解像度が同じなら、エンコーディング(VP9/h264)やitagで優先度を付けるのが理想だが、ここではitagの降順で代用
+            return parseInt(b.itag) - parseInt(a.itag);
         });
 
     const audioTracks = formats
         .filter(f => f.trackType === 'audio')
         .sort((a, b) => {
-            // itagでソート（高品質な音声itagを優先）
+            // 音声品質 (例: "AUDIO_QUALITY_HIGH") や itagでソート（高品質なものを優先）
+            // 簡略化のため、ここではitagの降順でソート
             return parseInt(b.itag) - parseInt(a.itag);
         });
     
@@ -278,13 +246,11 @@ app.get('/high/:id', async (req, res) => {
         .filter(f => f.trackType === 'combined')
         .filter(f => {
             // 複合トラックも1080p以下に制限
-            const res = f.resolution || '0x0';
-            const height = parseInt(res.split('x')[1]);
-            return height <= 1080;
+            return f.resolutionHeight > 0 && f.resolutionHeight <= 1080;
         })
         .sort((a, b) => {
-            // 複合トラックは 22 (720p) > 18 (360p) の順で優先
-            return parseInt(b.itag) - parseInt(a.itag); 
+            // 複合トラックは解像度降順で優先
+            return b.resolutionHeight - a.resolutionHeight;
         })[0] || null;
 
     if (combinedTrack) {
