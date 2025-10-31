@@ -22,7 +22,7 @@ const INVIDIOUS_INSTANCES = [
 // ⭐ 変更点 1: itagリストを2種類に分離
 
 // /stream/ で使用 (itag 18を含む、互換性重視)
-const TARGET_ITAGS_ALL = ['18'];
+const TARGET_ITAGS_ALL = ['18','399','299','248','137','247','140','249','250','251'];
 
 // /high/ で使用 (itag 18を含まない、高画質分離重視)
 const TARGET_ITAGS_HIGH = ['399','299','248','137','247','140','249','250','251'];
