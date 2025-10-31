@@ -20,7 +20,7 @@ const INVIDIOUS_INSTANCES = [
 ];
 
 // 取得したいitagのリスト。今回は全てを探すよ。
-const TARGET_ITAGS = ['399','299','248','137','247','140','249','250','251'];
+const TARGET_ITAGS = ['18','399','299','248','137','247','140','249','250','251'];
 
 async function getAllTargetFormats(videoId) {
     for (const baseUrl of INVIDIOUS_INSTANCES) {
