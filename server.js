@@ -26,9 +26,11 @@ const TARGET_ITAGS_ALL_OTHER = [
 ];
 
 // /high/ で使用 (複合 18, 22 を含まない、高画質分離重視の全フォーマット)
+// ⭐ 修正: 4K (313, 315, 266, 399) のitagを除外。最高で1440pまでを含むitagは残し、後続のフィルタで1080pに制限する。
+// itag 248, 271, 137, 299, 264 は 1080p を含むため残す。
 const TARGET_ITAGS_HIGH = [
-    '248', '271', '313', '315', '272',  // 動画のみ (VP9)
-    '137', '299', '399', '264', '266',  // 動画のみ (H.264)
+    '248', '271', '272', // 動画のみ (VP9, 1080p, 1440p)
+    '137', '299', '264', // 動画のみ (H.264, 1080p, 1440p)
     '251', '250', '249', '140', '141', '258'  // 音声のみ (Opus/AAC)
 ];
 
@@ -230,20 +232,26 @@ app.get('/high/:id', async (req, res) => {
     // 1. 分離トラック (Video/Audio) の厳選
     const videoTracks = formats
         .filter(f => f.trackType === 'video')
+        .filter(f => {
+            // ⭐ 1080p制限フィルター: 縦解像度が1080ピクセル以下であることを確認
+            const res = f.resolution || '0x0';
+            const height = parseInt(res.split('x')[1]);
+            return height <= 1080;
+        })
         .sort((a, b) => {
-            // 解像度とitagでソート
+            // 解像度の高いもの（1080pが最高）を優先的に選択
             const resA = parseInt((a.resolution || '0x0').split('x')[1]);
             const resB = parseInt((b.resolution || '0x0').split('x')[1]);
             if (resA === resB) {
-                return parseInt(b.itag) - parseInt(a.itag);
+                return parseInt(b.itag) - parseInt(a.itag); // 解像度が同じならitag（新しいコーデック）を優先
             }
-            return resB - resA;
+            return resB - resA; // 解像度（例: 1080）を優先
         });
 
     const audioTracks = formats
         .filter(f => f.trackType === 'audio')
         .sort((a, b) => {
-            // itagでソート
+            // itagでソート（高品質な音声itagを優先）
             return parseInt(b.itag) - parseInt(a.itag);
         });
     
@@ -256,7 +264,7 @@ app.get('/high/:id', async (req, res) => {
             success: true,
             videoId: resultVideoId,
             instance: instance,
-            message: "最高画質と最高音質の分離トラックを1つずつ厳選しました。これらを結合して再生してください。",
+            message: "最高画質(1080p以下)と最高音質の分離トラックを1つずつ厳選しました。これらを結合して再生してください。",
             video: bestVideo, 
             audio: bestAudio  
         };
@@ -268,6 +276,12 @@ app.get('/high/:id', async (req, res) => {
     
     const combinedTrack = formats
         .filter(f => f.trackType === 'combined')
+        .filter(f => {
+            // 複合トラックも1080p以下に制限
+            const res = f.resolution || '0x0';
+            const height = parseInt(res.split('x')[1]);
+            return height <= 1080;
+        })
         .sort((a, b) => {
             // 複合トラックは 22 (720p) > 18 (360p) の順で優先
             return parseInt(b.itag) - parseInt(a.itag); 
@@ -278,13 +292,13 @@ app.get('/high/:id', async (req, res) => {
             success: true,
             videoId: resultVideoId,
             instance: instance,
-            message: "分離トラックが見つからなかったため、代替として最も高画質な複合トラックを返します。",
+            message: "分離トラックが見つからなかったため、代替として最も高画質な複合トラック(1080p以下)を返します。",
             combined: combinedTrack
         };
         return res.status(200).json(finalResponse);
     }
     
-    // 4. 複合トラックも見つからなかった場合、最終的なエラーを返す (既にresultチェックで404は返されているが、念のため)
+    // 4. 複合トラックも見つからなかった場合、最終的なエラーを返す
     return res.status(404).json({ 
         success: false, 
         error: `動画ID ${videoId} のストリームは、分離トラックも複合トラックも全く見つかりませんでした。`,
