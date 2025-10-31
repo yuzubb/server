@@ -4,8 +4,7 @@ import express from 'express';
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-const videoCache = new Map();
-const CACHE_DURATION_MS = 4 * 60 * 60 * 1000; // 4時間 (ミリ秒)
+// キャッシュ関連の定義を削除
 
 const INVIDIOUS_INSTANCES = [
     'https://invidious.f5.si',
@@ -36,13 +35,16 @@ const TARGET_ITAGS_HIGH = [
 // ----------------------------------------------------
 // getAllTargetFormats 関数
 // ----------------------------------------------------
+/**
+ * Invidiousインスタンスを巡回し、指定されたitagのフォーマットを取得する。
+ * /stream/からの呼び出しではitag '18'を最優先する。
+ */
 async function getAllTargetFormats(videoId, targetItags) {
     
     // /stream/ のリクエストでのみ '18' を最優先するフラグ
-    // TARGET_ITAGS_ALL_OTHER が渡された場合、'18' を特別に優先する
     const prioritizeItag18 = targetItags === TARGET_ITAGS_ALL_OTHER; 
     
-    // 検索するタグのリストを作成 (優先処理用)
+    // 検索するタグのリスト
     let searchItags = prioritizeItag18 ? targetItags : targetItags;
 
     for (const baseUrl of INVIDIOUS_INSTANCES) {
@@ -53,7 +55,7 @@ async function getAllTargetFormats(videoId, targetItags) {
             console.log(`[${videoId}] インスタンス試すよ: ${baseUrl}`);
             
             const controller = new AbortController();
-            const timeoutId = setTimeout(() => controller.abort(), 7000); 
+            const timeoutId = setTimeout(() => controller.abort(), 7000); // 7秒のタイムアウト
 
             const response = await fetch(apiUrl, { signal: controller.signal });
             clearTimeout(timeoutId);
@@ -106,7 +108,7 @@ async function getAllTargetFormats(videoId, targetItags) {
                         
                         const isAudioOnly = !!format.audioQuality;
                         const isVideoOnly = !!format.qualityLabel && !format.audioQuality;
-                        const isCombined = format.itag === '22';
+                        const isCombined = format.itag === '22'; // itag 22は複合トラックとして特別に扱う
                         
                         foundFormats.push({
                             videoUrl: format.url,
@@ -115,6 +117,7 @@ async function getAllTargetFormats(videoId, targetItags) {
                             resolution: format.resolution,
                             container: format.container,
                             encoding: format.encoding,
+                            // トラックタイプの判別
                             trackType: isAudioOnly ? 'audio' : (isVideoOnly ? 'video' : (isCombined ? 'combined' : 'unknown'))
                         });
                     }
@@ -129,7 +132,7 @@ async function getAllTargetFormats(videoId, targetItags) {
                         formats: foundFormats
                     };
                 } else {
-                    // /high/ の場合に備え、itag 18, 22 の複合トラックをここで探しておく (再試行用)
+                    // /high/ の場合に備え、itag 18, 22 の複合トラックをここで探しておく (フォールバック用)
                     if (!prioritizeItag18) {
                         const fallbackFormats = [];
                         const fallbackItags = ['22', '18'];
@@ -169,7 +172,7 @@ async function getAllTargetFormats(videoId, targetItags) {
         }
     }
 
-    return null;
+    return null; // 全てのインスタンスで失敗
 }
 
 // ----------------------------------------------------
@@ -184,35 +187,21 @@ app.get('/stream/:id', async (req, res) => {
         });
     }
 
-    const cachedItem = videoCache.get(videoId);
-    let result = null;
+    // TARGET_ITAGS_ALL_OTHER を渡し、関数内で '18' を最優先させる
+    const result = await getAllTargetFormats(videoId, TARGET_ITAGS_ALL_OTHER);
     
-    if (cachedItem && cachedItem.expiry > Date.now()) {
-        console.log(`[${videoId}] キャッシュヒット！4時間以内だから即返すわ`);
-        result = cachedItem.data;
+    if (result) {
+        return res.status(200).json(result);
     } else {
-        // TARGET_ITAGS_ALL_OTHER を渡し、関数内で '18' を最優先させる
-        result = await getAllTargetFormats(videoId, TARGET_ITAGS_ALL_OTHER);
-        
-        if (result) {
-            videoCache.set(videoId, {
-                data: result,
-                expiry: Date.now() + CACHE_DURATION_MS
-            });
-            console.log(`[${videoId}] 新しい結果をキャッシュに保存したよ。4時間有効ね`);
-        } else {
-            return res.status(404).json({ 
-                success: false, 
-                error: `動画ID ${videoId} のストリームはどこにも無かったよ。` 
-            });
-        }
+        return res.status(404).json({ 
+            success: false, 
+            error: `動画ID ${videoId} のストリームはどこにも無かったよ。` 
+        });
     }
-
-    return res.status(200).json(result);
 });
 
 // ----------------------------------------------------
-// ⭐ 修正点: /high/:id エンドポイント (代替ロジックを追加)
+// /high/:id エンドポイント
 // ----------------------------------------------------
 app.get('/high/:id', async (req, res) => {
     const videoId = req.params.id;
@@ -223,46 +212,26 @@ app.get('/high/:id', async (req, res) => {
         });
     }
 
-    const cachedItem = videoCache.get(videoId); 
-    let result = null;
+    // TARGET_ITAGS_HIGH を渡す (分離トラックを探す。見つからなければ複合トラックがフォールバックとして返る可能性がある)
+    const result = await getAllTargetFormats(videoId, TARGET_ITAGS_HIGH);
     
-    // 1. キャッシュチェック
-    if (cachedItem && cachedItem.expiry > Date.now()) {
-        console.log(`[${videoId}] キャッシュヒット！処理を続行するわ`);
-        result = cachedItem.data; 
-    } else {
-        // 2. キャッシュがない、または期限切れの場合はデータ取得
-        // TARGET_ITAGS_HIGH を渡す (分離トラックを探す)
-        result = await getAllTargetFormats(videoId, TARGET_ITAGS_HIGH);
-        
-        if (result) {
-            videoCache.set(videoId, {
-                data: result,
-                expiry: Date.now() + CACHE_DURATION_MS
-            });
-            console.log(`[${videoId}] 新しい結果をキャッシュに保存したよ。4時間有効ね`);
-        } else {
-            // ⭐ 分離トラックが見つからなかった場合、エラーを返さずに終了 (getAllTargetFormats内で複合トラックが見つかっている可能性があるため)
-            console.log(`[${videoId}] TARGET_ITAGS_HIGH で分離トラックは見つかりませんでしたが、他の形式をチェックします。`);
-        }
-    }
-
-    // 3. 結果をフィルタリングして厳選
-    const dataToProcess = result || cachedItem?.data;
-
-    if (!dataToProcess) {
+    if (!result) {
+        // 分離トラックも複合トラックも全く見つからなかった場合
         return res.status(404).json({ 
             success: false, 
             error: `動画ID ${videoId} のストリームはどこにも無かったよ。` 
         });
     }
 
+    // 取得した結果をフィルタリングして厳選
+    const dataToProcess = result; 
     const { success, videoId: resultVideoId, instance, formats } = dataToProcess;
     
-    // 分離トラック (Video/Audio) の厳選
+    // 1. 分離トラック (Video/Audio) の厳選
     const videoTracks = formats
         .filter(f => f.trackType === 'video')
         .sort((a, b) => {
+            // 解像度とitagでソート
             const resA = parseInt((a.resolution || '0x0').split('x')[1]);
             const resB = parseInt((b.resolution || '0x0').split('x')[1]);
             if (resA === resB) {
@@ -274,27 +243,27 @@ app.get('/high/:id', async (req, res) => {
     const audioTracks = formats
         .filter(f => f.trackType === 'audio')
         .sort((a, b) => {
+            // itagでソート
             return parseInt(b.itag) - parseInt(a.itag);
         });
     
     const bestVideo = videoTracks[0] || null;
     const bestAudio = audioTracks[0] || null;
 
-    // 4. 分離トラックのペアが見つかったかどうかのチェック
+    // 2. 分離トラックのペアが見つかったかどうかのチェック
     if (bestVideo && bestAudio) {
-        // 分離トラックが見つかった場合
         const finalResponse = {
             success: true,
             videoId: resultVideoId,
             instance: instance,
-            message: "最高画質と最高音質のトラックを1つずつ厳選しました。これらを結合して再生してください。",
-            video: bestVideo, // 最高の動画トラック (厳選1つ)
-            audio: bestAudio  // 最高の音声トラック (厳選1つ)
+            message: "最高画質と最高音質の分離トラックを1つずつ厳選しました。これらを結合して再生してください。",
+            video: bestVideo, 
+            audio: bestAudio  
         };
         return res.status(200).json(finalResponse);
     } 
     
-    // ⭐ 5. 分離トラックのペアが見つからなかった場合の代替処理
+    // 3. 分離トラックのペアが見つからなかった場合の代替処理 (複合トラックの提供)
     console.warn(`[${videoId}] 分離トラックのペアが見つかりませんでした。複合トラックを探します。`);
     
     const combinedTrack = formats
@@ -305,7 +274,6 @@ app.get('/high/:id', async (req, res) => {
         })[0] || null;
 
     if (combinedTrack) {
-        // 複合トラックが見つかった場合、それを代替として返す
         const finalResponse = {
             success: true,
             videoId: resultVideoId,
@@ -316,7 +284,7 @@ app.get('/high/:id', async (req, res) => {
         return res.status(200).json(finalResponse);
     }
     
-    // 6. 複合トラックも見つからなかった場合、最終的なエラーを返す
+    // 4. 複合トラックも見つからなかった場合、最終的なエラーを返す (既にresultチェックで404は返されているが、念のため)
     return res.status(404).json({ 
         success: false, 
         error: `動画ID ${videoId} のストリームは、分離トラックも複合トラックも全く見つかりませんでした。`,
@@ -331,7 +299,7 @@ app.get('/high/:id', async (req, res) => {
 // ------------------------------------------
 
 app.get('/', (req, res) => {
-    res.status(200).send('Invidious Proxyは動いてるよ。動画データが欲しいなら /stream/:id (全フォーマット) または /high/:id (最高画質/音質の分離を厳選) を使ってね。');
+    res.status(200).send('Invidious Proxyは動いてるよ。動画データが欲しいなら /stream/:id (互換性重視) または /high/:id (最高画質/音質の分離を厳選) を使ってね。');
 });
 
 
