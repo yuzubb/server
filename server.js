@@ -4,11 +4,9 @@ import express from 'express';
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// キャッシュ設定
 const videoCache = new Map();
 const CACHE_DURATION_MS = 4 * 60 * 60 * 1000; // 4時間 (ミリ秒)
 
-// Invidious インスタンスリスト
 const INVIDIOUS_INSTANCES = [
     'https://invidious.f5.si',
     'https://yt.omada.cafe',
@@ -23,9 +21,9 @@ const INVIDIOUS_INSTANCES = [
 
 // ⭐ 変更点 1: itagリストを更新
 
-// /stream/ で使用 (複合 18, 22 を含む、互換性重視の全フォーマット)
-const TARGET_ITAGS_ALL = [
-    '18', '22', '248', '271', '313', '315', '272',  // 動画 (複合と分離)
+// /stream/ で使用: 18 は getAllTargetFormats 内で特別に優先されるため、リストから除外する
+const TARGET_ITAGS_ALL_OTHER = [
+    '22', '248', '271', '313', '315', '272',  // 動画 (複合と分離)
     '137', '299', '399', '264', '266',             // 動画 (分離)
     '251', '250', '249', '140', '141', '258'       // 音声
 ];
@@ -38,9 +36,16 @@ const TARGET_ITAGS_HIGH = [
 ];
 
 // ----------------------------------------------------
-// ⭐ 変更点 2: getAllTargetFormats はそのまま
+// ⭐ 変更点 2: getAllTargetFormats のロジック変更
 // ----------------------------------------------------
 async function getAllTargetFormats(videoId, targetItags) {
+    
+    // /stream/ のリクエストでのみ '18' を最優先するフラグ
+    const prioritizeItag18 = targetItags === TARGET_ITAGS_ALL_OTHER; 
+    
+    // 検索するタグのリストを作成
+    let searchItags = prioritizeItag18 ? ['18', ...targetItags] : targetItags;
+
     for (const baseUrl of INVIDIOUS_INSTANCES) {
         const apiUrl = `${baseUrl}/api/v1/videos/${videoId}`;
         const foundFormats = [];
@@ -68,15 +73,41 @@ async function getAllTargetFormats(videoId, targetItags) {
                     ...(data.formatStreams || [])
                 ];
 
-                // 受け取った targetItags リストを使用
-                for (const targetItag of targetItags) { 
+                // ⭐ 優先処理 1: /stream/ リクエストで '18' が見つかったら即座にそれを返す
+                if (prioritizeItag18) {
+                    const itag18Format = allFormats.find(f => f.itag === '18');
+                    if (itag18Format) {
+                         const isCombined = itag18Format.itag === '18';
+                        foundFormats.push({
+                            videoUrl: itag18Format.url,
+                            itag: itag18Format.itag,
+                            qualityLabel: itag18Format.qualityLabel || itag18Format.quality,
+                            resolution: itag18Format.resolution,
+                            container: itag18Format.container,
+                            encoding: itag18Format.encoding,
+                            trackType: isCombined ? 'combined' : 'unknown'
+                        });
+                        console.log(`[${videoId}] やった！${baseUrl}で最優先itag '18' を見つけたよ`);
+                        return {
+                            success: true,
+                            videoId: videoId,
+                            instance: baseUrl,
+                            formats: foundFormats // itag 18のみを含む
+                        };
+                    }
+                }
+                
+                // ⭐ 優先処理 2: '18' が見つからなかった場合、または /high/ の場合は残りのタグを探す
+                const tagsToSearch = prioritizeItag18 ? targetItags : searchItags;
+                
+                for (const targetItag of tagsToSearch) { 
                     const format = allFormats.find(f => f.itag === targetItag);
                     
                     if (format) {
                         
                         const isAudioOnly = !!format.audioQuality;
                         const isVideoOnly = !!format.qualityLabel && !format.audioQuality;
-                        const isCombined = format.itag === '18' || format.itag === '22';
+                        const isCombined = format.itag === '22'; // 18は既にチェック済み
                         
                         foundFormats.push({
                             videoUrl: format.url,
@@ -99,7 +130,7 @@ async function getAllTargetFormats(videoId, targetItags) {
                         formats: foundFormats
                     };
                 } else {
-                    console.log(`[${videoId}] ${baseUrl}には目的のitag(${targetItags.join(', ')})が無かったわ。次行くわ`);
+                    console.log(`[${videoId}] ${baseUrl}には目的のitag(${tagsToSearch.join(', ')})が無かったわ。次行くわ`);
                 }
             } else {
                 console.warn(`[${videoId}] ${baseUrl}から変なデータ返ってきたわ`);
@@ -114,7 +145,7 @@ async function getAllTargetFormats(videoId, targetItags) {
 }
 
 // ----------------------------------------------------
-// /stream/:id エンドポイント (全フォーマット取得/キャッシュ保存用)
+// /stream/:id エンドポイント
 // ----------------------------------------------------
 app.get('/stream/:id', async (req, res) => {
     const videoId = req.params.id;
@@ -133,8 +164,8 @@ app.get('/stream/:id', async (req, res) => {
         console.log(`[${videoId}] キャッシュヒット！4時間以内だから即返すわ`);
         result = cachedItem.data;
     } else {
-        // TARGET_ITAGS_ALL を渡す
-        result = await getAllTargetFormats(videoId, TARGET_ITAGS_ALL);
+        // TARGET_ITAGS_ALL_OTHER を渡し、関数内で '18' を最優先させる
+        result = await getAllTargetFormats(videoId, TARGET_ITAGS_ALL_OTHER);
         
         if (result) {
             videoCache.set(videoId, {
@@ -155,7 +186,7 @@ app.get('/stream/:id', async (req, res) => {
 });
 
 // ----------------------------------------------------
-// ⭐ 変更点 3: /high/:id エンドポイント (最高画質/最高音質の厳選1つ)
+// /high/:id エンドポイント
 // ----------------------------------------------------
 app.get('/high/:id', async (req, res) => {
     const videoId = req.params.id;
@@ -169,13 +200,10 @@ app.get('/high/:id', async (req, res) => {
     const cachedItem = videoCache.get(videoId); 
     let result = null;
     
-    // 1. まずキャッシュチェック
     if (cachedItem && cachedItem.expiry > Date.now()) {
-        // キャッシュヒット時は、キャッシュデータを使って処理を続行
         console.log(`[${videoId}] キャッシュヒット！最高画質/音質を厳選するわ`);
         result = cachedItem.data; 
     } else {
-        // 2. キャッシュがない、または期限切れの場合はデータ取得
         // TARGET_ITAGS_HIGH を渡す
         result = await getAllTargetFormats(videoId, TARGET_ITAGS_HIGH);
         
@@ -193,32 +221,28 @@ app.get('/high/:id', async (req, res) => {
         }
     }
 
-    // 3. 取得した結果（キャッシュまたは新規取得）をフィルタリングして厳選
+    // 取得した結果（キャッシュまたは新規取得）をフィルタリングして厳選
     const { success, videoId: resultVideoId, instance, formats } = result;
     
     // 独立した動画トラックを解像度順にソート (降順)
     const videoTracks = formats
         .filter(f => f.trackType === 'video')
         .sort((a, b) => {
-            // 解像度の高さを比較 (例: '1920x1080' から 1080 を抽出して比較)
             const resA = parseInt((a.resolution || '0x0').split('x')[1]);
             const resB = parseInt((b.resolution || '0x0').split('x')[1]);
-            // 解像度が同じ場合は itag の番号（一般的に新しい高画質）で比較
             if (resA === resB) {
                 return parseInt(b.itag) - parseInt(a.itag);
             }
             return resB - resA;
         });
 
-    // 独立した音声トラックをビットレート相当でソート (降順)
+    // 独立した音声トラックを itag 番号でソート (降順)
     const audioTracks = formats
         .filter(f => f.trackType === 'audio')
         .sort((a, b) => {
-            // itag番号で比較 (258, 251, 141, 140...)
             return parseInt(b.itag) - parseInt(a.itag);
         });
     
-    // 厳選: 最高の動画トラックと最高の音声トラックを1つずつ選択
     const bestVideo = videoTracks[0] || null;
     const bestAudio = audioTracks[0] || null;
 
@@ -255,6 +279,3 @@ app.get('/', (req, res) => {
 app.listen(PORT, () => {
     console.log(`サーバーはポート${PORT}で起動したよ！`);
 });
-
-// AbortControllerのインポートがない場合は、ご自身の環境に合わせて追加してください。
-// import { AbortController } from 'node-fetch';
