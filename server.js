@@ -146,8 +146,8 @@ app.get('/stream/:id', async (req, res) => {
 
     if (combinedTracks.length > 0) {
         bestCombined = combinedTracks.sort((a, b) => {
-            return a.resolutionHeight - b.resolutionHeight;
-        }).find(f => f.resolutionHeight >= 360) || combinedTracks[0];
+            return b.resolutionHeight - a.resolutionHeight; // 複合トラックは高解像度を優先
+        })[0];
     }
 
     if (bestCombined) {
@@ -155,7 +155,7 @@ app.get('/stream/:id', async (req, res) => {
             success: result.success,
             videoId: result.videoId,
             instance: result.instance,
-            message: "互換性を最優先し、複合トラック（360p付近）を厳選したぜ。",
+            message: "互換性を最優先し、最も高画質な複合トラックを厳選したぜ。",
             formats: [bestCombined]
         });
     }
@@ -197,7 +197,6 @@ app.get('/high/:id', async (req, res) => {
 
             const encoding = (f.encoding || '').toLowerCase();
             
-            // H.264/AVCまたはVP9を許可
             if (encoding.includes('avc') || encoding.includes('h.264') || encoding.includes('vp9')) {
                 return true;
             }
@@ -205,7 +204,6 @@ app.get('/high/:id', async (req, res) => {
             return false;
         })
         .sort((a, b) => {
-            // 1. 解像度の高いものを優先
             if (a.resolutionHeight !== b.resolutionHeight) {
                 return b.resolutionHeight - a.resolutionHeight; 
             }
@@ -213,11 +211,9 @@ app.get('/high/:id', async (req, res) => {
             const aIsH264 = (a.encoding || '').toLowerCase().includes('avc') || (a.encoding || '').toLowerCase().includes('h.264');
             const bIsH264 = (b.encoding || '').toLowerCase().includes('avc') || (b.encoding || '').toLowerCase().includes('h.264');
 
-            // 2. H.264をVP9より優先
             if (aIsH264 && !bIsH264) return -1;
             if (!aIsH264 && bIsH264) return 1;
 
-            // 3. それ以外はitagの降順で代用 (大体高画質なものが優先される)
             return parseInt(b.itag) - parseInt(a.itag);
         });
 
@@ -227,7 +223,6 @@ app.get('/high/:id', async (req, res) => {
         .filter(f => {
             const encoding = (f.encoding || '').toLowerCase();
             
-            // AACまたはOpusを許可
             if (encoding.includes('aac') || encoding.includes('opus')) {
                 return true;
             }
@@ -238,11 +233,9 @@ app.get('/high/:id', async (req, res) => {
             const aIsAAC = (a.encoding || '').toLowerCase().includes('aac');
             const bIsAAC = (b.encoding || '').toLowerCase().includes('aac');
 
-            // 1. AACをOpusより優先
             if (aIsAAC && !bIsAAC) return -1;
             if (!aIsAAC && bIsAAC) return 1;
 
-            // 2. それ以外はitagの降順で代用
             return parseInt(b.itag) - parseInt(a.itag);
         });
     
@@ -266,14 +259,11 @@ app.get('/high/:id', async (req, res) => {
         return res.status(200).json(finalResponse);
     } 
     
-    console.warn(`[${videoId}] 分離トラックペア（H.264/VP9とAAC/Opus）が見つからなかったぜ。複合トラックを探す。`);
+    console.warn(`[${videoId}] 分離トラックペア（H.264/VP9とAAC/Opus）が見つからなかったぜ。複合トラックを必ず探す！`);
     
-    // 3. 代替の複合トラックのフィルタリング (MP4を優先)
+    // 3. 代替の複合トラックのフィルタリング (制約を緩め、必ずどれか見つける)
     const combinedTrack = formats
         .filter(f => f.trackType === 'combined')
-        .filter(f => {
-            return f.resolutionHeight > 0 && f.resolutionHeight <= 1080;
-        })
         .sort((a, b) => {
             // 1. 解像度が高いものを優先
             if (a.resolutionHeight !== b.resolutionHeight) {
@@ -286,15 +276,17 @@ app.get('/high/:id', async (req, res) => {
             if (!aIsMp4 && bIsMp4) return 1;
             
             return parseInt(b.itag) - parseInt(a.itag);
-        })[0] || null;
+        })[0] || null; // 最も良い複合トラックを一つ選ぶ
 
     if (combinedTrack) {
         const containerType = (combinedTrack.container || '').toUpperCase();
+        const resolution = combinedTrack.resolutionHeight || '不明';
+        
         const finalResponse = {
             success: true,
             videoId: resultVideoId,
             instance: instance,
-            message: `分離トラックが見つからなかったから、代替として最も高画質な複合トラック(${containerType}/1080p以下)を返すぜ。`,
+            message: `分離トラックの再生が不安定だった場合に備えて、代替として最も高画質な複合トラック(${containerType}/${resolution}p)を返すぜ。`,
             combined: combinedTrack
         };
         return res.status(200).json(finalResponse);
@@ -302,9 +294,9 @@ app.get('/high/:id', async (req, res) => {
     
     return res.status(404).json({ 
         success: false, 
-        error: `動画ID ${videoId} のストリームは、タブレット互換性の高いトラックが一つも見つからなかったぜ。`,
+        error: `動画ID ${videoId} のストリームは、タブレットで再生できるトラックが本当に一つも見つからなかったぜ。`,
         details: {
-            message: "互換性の高い分離トラック（H.264/VP9 + AAC/Opus）のペアも、互換性の高い複合トラックも見つからなかった。",
+            message: "H.264/VP9分離トラック、AAC/Opus音声トラック、複合トラックのいずれも見つからなかった。",
             videoFound: !!bestVideo,
             audioFound: !!bestAudio,
             combinedFound: !!combinedTrack
