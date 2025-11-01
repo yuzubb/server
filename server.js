@@ -8,7 +8,6 @@ const videoCache = {};
 const CACHE_TTL = 4 * 60 * 60 * 1000;
 
 const INVIDIOUS_INSTANCES = [
-    'https://invidious.f5.si',
     'https://yt.omada.cafe',
     'https://inv.perditum.com',
     'https://iv.melmac.space',
@@ -203,10 +202,12 @@ app.get('/high/:id', async (req, res) => {
             const encoding = (f.encoding || '').toLowerCase();
             const container = (f.container || '').toLowerCase();
 
+            // H.264コーデックとMP4コンテナに厳格に限定
             if (!encoding.includes('avc') && !encoding.includes('h.264')) {
                 return false;
             }
             if (container !== 'mp4') {
+                console.log(`[${f.videoId}] MP4じゃないコンテナ(${container})の動画トラックは除外したぜ。`);
                 return false;
             }
 
@@ -219,29 +220,25 @@ app.get('/high/:id', async (req, res) => {
             return parseInt(b.itag) - parseInt(a.itag);
         });
 
-    // 2. 音声トラック (互換性の高いAAC/MP4を優先しつつ、Opusも許容)
+    // 2. 音声トラック (AAC/MP4に厳格限定)
     const audioTracks = formats
         .filter(f => f.trackType === 'audio')
         .filter(f => {
             const encoding = (f.encoding || '').toLowerCase();
             const container = (f.container || '').toLowerCase();
 
-            // AAC (itag140など) または Opus (itag251など) のみを許可
-            if (encoding.includes('aac') || encoding.includes('opus')) {
-                return true;
+            // AACコーデックとMP4コンテナに厳格に限定
+            if (!encoding.includes('aac')) {
+                return false;
+            }
+            if (container !== 'mp4') {
+                console.log(`[${f.videoId}] MP4じゃないコンテナ(${container})の音声トラックは除外したぜ。`);
+                return false;
             }
 
-            return false;
+            return true;
         })
         .sort((a, b) => {
-            // AAC (itag140) を優先するため、AAC判定に高いスコアを与える
-            const aIsAAC = (a.encoding || '').toLowerCase().includes('aac');
-            const bIsAAC = (b.encoding || '').toLowerCase().includes('aac');
-
-            if (aIsAAC && !bIsAAC) return -1;
-            if (!aIsAAC && bIsAAC) return 1;
-
-            // それ以外はitagの降順で代用 (Opusトラックの品質を優先)
             return parseInt(b.itag) - parseInt(a.itag);
         });
     
@@ -253,20 +250,20 @@ app.get('/high/:id', async (req, res) => {
             success: true,
             videoId: resultVideoId,
             instance: instance,
-            message: "H.264動画と互換性の高い音声トラック（AAC優先）で厳選したペアだぜ。",
+            message: "タブレット互換性最優先！H.264/MP4とAAC/MP4で厳選したペアだぜ。",
             video: bestVideo, 
             audio: bestAudio  
         };
         return res.status(200).json(finalResponse);
     } 
     
-    console.warn(`[${videoId}] 互換性最優先の分離トラックペア（H.264/AACまたはOpus）は見つからなかったぜ。`);
+    console.warn(`[${videoId}] 厳格なMP4分離トラックペアが見つからなかったぜ。複合トラックを探す。`);
     
-    // 3. 代替の複合トラックのフィルタリング
+    // 3. 代替の複合トラックのフィルタリング (MP4に限定)
     const combinedTrack = formats
         .filter(f => f.trackType === 'combined')
         .filter(f => {
-            // 複合トラックは、最も互換性の高いMP4コンテナに限定
+            // 複合トラックもMP4コンテナに限定
             return f.resolutionHeight > 0 && f.resolutionHeight <= 1080 && (f.container || '').toLowerCase() === 'mp4';
         })
         .sort((a, b) => {
@@ -278,7 +275,7 @@ app.get('/high/:id', async (req, res) => {
             success: true,
             videoId: resultVideoId,
             instance: instance,
-            message: "分離トラックが見つからなかったから、代替として最も高画質な複合トラック(MP4/1080p以下)を返すぜ。",
+            message: "分離トラックが見つからなかったから、代替として最も高画質なMP4複合トラック(1080p以下)を返すぜ。",
             combined: combinedTrack
         };
         return res.status(200).json(finalResponse);
@@ -286,9 +283,9 @@ app.get('/high/:id', async (req, res) => {
     
     return res.status(404).json({ 
         success: false, 
-        error: `動画ID ${videoId} のストリームは、タブレット互換性の高いトラックが一つも見つからなかったぜ。`,
+        error: `動画ID ${videoId} のストリームは、タブレット互換性の高いMP4トラックが一つも見つからなかったぜ。`,
         details: {
-            message: "H.264動画トラックと、互換性の高い音声トラックのペア、または互換性の高い複合トラックが見つからなかった。",
+            message: "MP4コンテナの分離トラック、またはMP4複合トラックが見つからなかった。",
             videoFound: !!bestVideo,
             audioFound: !!bestAudio,
             combinedFound: !!combinedTrack
