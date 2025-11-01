@@ -178,14 +178,12 @@ app.get('/high/:id', async (req, res) => {
         });
     }
 
-    // ユーザーの要望に基づき、新しいAPIエンドポイントを使用
     const API_URL = `https://siawaseok.f5.si/api/streams/${videoId}`;
 
     try {
         console.log(`[${videoId}] 新しいAPIを試します: ${API_URL}`);
         
         const controller = new AbortController();
-        // タイムアウト設定
         const timeoutId = setTimeout(() => controller.abort(), 7000);
 
         const response = await fetch(API_URL, { signal: controller.signal });
@@ -210,16 +208,12 @@ app.get('/high/:id', async (req, res) => {
         
         const formats = data.formats;
         
-        // 1. resolutionから高さを抽出するヘルパー関数
         const getResolutionHeight = (format) => {
-            // resolutionフィールドかqualityLabelフィールドから数値 (例: 1080p -> 1080) を抽出
             const resString = format.resolution || format.qualityLabel || '';
             const resMatch = resString.match(/(\d+)/); 
             return resMatch ? parseInt(resMatch[1]) : 0;
         };
 
-        // 2. m3u8 manifestを持つ最高画質のmanifestを見つけるロジック
-        // manifestフィールドが存在し、かつ値が.m3u8を含むものをHLSストリームとしてフィルタリング
         const manifestFormats = formats.filter(f => f.manifest && f.manifest.includes('.m3u8')); 
         
         if (manifestFormats.length === 0) {
@@ -232,11 +226,9 @@ app.get('/high/:id', async (req, res) => {
         let bestManifestFormat = null;
         let maxResolutionHeight = -1;
         
-        // 最高画質のmanifest URLを持つフォーマットを選択
         for (const format of manifestFormats) {
             const height = getResolutionHeight(format);
             
-            // 最高解像度のトラックを選ぶ
             if (height > maxResolutionHeight) {
                 maxResolutionHeight = height;
                 bestManifestFormat = format;
@@ -244,18 +236,40 @@ app.get('/high/:id', async (req, res) => {
         }
         
         if (bestManifestFormat) {
-            // 最高画質のmanifest URLをJSONオブジェクトの一部として返す
             const m3u8Url = bestManifestFormat.manifest;
             
-            console.log(`[${videoId}] 最高画質のm3u8 URL (${maxResolutionHeight}p) を選んだぜ。`);
+            console.log(`[${videoId}] 最高画質のm3u8 URL (${maxResolutionHeight}p) を取得し、コンテンツをプロキシします。`);
             
-            return res.status(200).json({
-                success: true,
-                videoId: videoId,
-                resolution: bestManifestFormat.resolution || `${maxResolutionHeight}p`,
-                m3u8Url: m3u8Url,
-                message: "最高画質のHLS (m3u8) マニフェストURLを厳選したぜ。"
-            });
+            // --- M3U8コンテンツを直接取得してクライアントに返す ---
+            try {
+                const manifestResponse = await fetch(m3u8Url);
+
+                if (!manifestResponse.ok) {
+                    console.error(`[${videoId}] M3U8マニフェストの取得に失敗しました: ${manifestResponse.status}`);
+                    return res.status(502).json({ 
+                        success: false, 
+                        error: `M3U8マニフェストのプロキシに失敗しました。ステータスコード: ${manifestResponse.status}` 
+                    });
+                }
+
+                // Content-TypeをM3U8マニフェストとして設定
+                res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
+                // キャッシュのヒントを設定
+                res.setHeader('Cache-Control', 'public, max-age=3600'); 
+                
+                // M3U8ファイルのコンテンツを直接レスポンスとして返す
+                const manifestContent = await manifestResponse.text();
+                return res.status(200).send(manifestContent);
+                
+            } catch (fetchError) {
+                console.error(`[${videoId}] M3U8マニフェストの取得中にエラーが発生しました: ${fetchError.message}`);
+                 return res.status(500).json({ 
+                    success: false, 
+                    error: 'M3U8マニフェストのプロキシ中にエラーが発生しました。', 
+                    details: fetchError.message 
+                });
+            }
+            // --- 変更終了 ---
         }
 
         return res.status(404).json({ 
@@ -265,7 +279,6 @@ app.get('/high/:id', async (req, res) => {
 
     } catch (error) {
         console.error(`[${videoId}] ストリーム情報取得中にエラーが発生しました: ${error.message}`);
-        // タイムアウトなどでAbortErrorが発生した場合も500を返す
         return res.status(500).json({ 
             success: false, 
             error: 'サーバー側でエラーが発生しました。', 
