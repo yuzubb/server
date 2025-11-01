@@ -23,11 +23,9 @@ const INVIDIOUS_INSTANCES = [
 
 /**
  * Invidiousレスポンスのフォーマットオブジェクトを、より汎用的な構造に変換し、トラックタイプを判別する。
- * @param {object} format - Invidious APIから取得した単一のフォーマットオブジェクト
- * @returns {object} 整理されたフォーマット情報
+ * (中略: normalizeFormat 関数は変更なし)
  */
 function normalizeFormat(format) {
-    // スキーマに基づき、resolutionとaudioQualityの有無で判別
     const hasResolution = !!format.resolution || !!format.qualityLabel;
     const hasAudioQuality = !!format.audioQuality || !!(format.quality && format.quality.includes('audio'));
 
@@ -60,14 +58,14 @@ function normalizeFormat(format) {
 
 
 // ----------------------------------------------------
-// getAllFormats 関数 (キャッシュ処理を追加)
+// getAllFormats 関数 (キャッシュ処理を含む)
 // ----------------------------------------------------
 /**
  * Invidiousインスタンスを巡回し、利用可能な全てのフォーマットを正規化して取得する。
  */
 async function getAllFormats(videoId) {
 
-    // ⭐ 1. キャッシュの確認と有効期限チェック
+    // 1. キャッシュの確認と有効期限チェック
     const cachedItem = videoCache[videoId];
     if (cachedItem && (Date.now() < cachedItem.timestamp + CACHE_TTL)) {
         console.log(`[${videoId}] キャッシュから取得したよ。`);
@@ -103,7 +101,6 @@ async function getAllFormats(videoId) {
                 // 全てのフォーマットを正規化
                 const normalizedFormats = allFormats
                     .map(normalizeFormat)
-                    // typeが不明なものを除外
                     .filter(f => f.trackType !== 'unknown');
                 
                 if (normalizedFormats.length > 0) {
@@ -118,7 +115,7 @@ async function getAllFormats(videoId) {
                         formats: normalizedFormats
                     };
 
-                    // ⭐ 2. キャッシュに保存
+                    // 2. キャッシュに保存
                     videoCache[videoId] = {
                         timestamp: Date.now(),
                         data: result
@@ -141,7 +138,7 @@ async function getAllFormats(videoId) {
 }
 
 // ----------------------------------------------------
-// /stream/:id エンドポイント (互換性/18相当を優先)
+// /stream/:id エンドポイント 
 // ----------------------------------------------------
 app.get('/stream/:id', async (req, res) => {
     const videoId = req.params.id;
@@ -163,7 +160,7 @@ app.get('/stream/:id', async (req, res) => {
 
     const { formats } = result;
     
-    // 互換性優先ロジック:
+    // 互換性優先ロジック: 複合トラック (360p付近) を探す。
     const combinedTracks = formats.filter(f => f.trackType === 'combined');
     
     let bestCombined = null;
@@ -220,7 +217,7 @@ app.get('/high/:id', async (req, res) => {
     const videoTracks = formats
         .filter(f => f.trackType === 'video')
         .filter(f => {
-            // 1080p制限フィルター
+            // ⭐ 1080p制限フィルタ: 1080p以下に限定。itag399 (4K) はここで除外される。
             return f.resolutionHeight > 0 && f.resolutionHeight <= 1080;
         })
         .sort((a, b) => {
@@ -229,7 +226,8 @@ app.get('/high/:id', async (req, res) => {
                 return b.resolutionHeight - a.resolutionHeight; 
             }
             
-            // 2. 解像度が同じ場合、互換性の高いH.264を優先 (h264 > vp9)
+            // ⭐ 2. 解像度が同じ場合、互換性の高いH.264を優先 (h264 > vp9)
+            // これにより、同じ1080pでもVP9よりH.264が選ばれる。
             const isAH264 = (a.encoding || '').toLowerCase().includes('h.264') || (a.encoding || '').toLowerCase().includes('avc');
             const isBH264 = (b.encoding || '').toLowerCase().includes('h.264') || (b.encoding || '').toLowerCase().includes('avc');
             
@@ -301,7 +299,7 @@ app.get('/high/:id', async (req, res) => {
 });
 
 // ----------------------------------------------------
-// ⭐ /api/cache エンドポイントの追加
+// /api/cache エンドポイントの追加 (変更なし)
 // ----------------------------------------------------
 app.get('/api/cache', (req, res) => {
     const cachedVideos = Object.keys(videoCache).map(videoId => {
@@ -309,7 +307,6 @@ app.get('/api/cache', (req, res) => {
         const expiresAt = item.timestamp + CACHE_TTL;
         const remainingTimeSeconds = Math.max(0, Math.floor((expiresAt - Date.now()) / 1000));
         
-        // キャッシュアイテムから必要な情報を取り出す
         const { title, thumbnail, instance } = item.data;
 
         return {
@@ -319,17 +316,6 @@ app.get('/api/cache', (req, res) => {
             thumbnailUrl: thumbnail ? thumbnail.url : 'サムネイルなし',
             cachedAt: new Date(item.timestamp).toISOString(),
             expiresInSeconds: remainingTimeSeconds,
-            // 簡易的に表示用HTMLタグを生成
-            html: `
-                <div>
-                    <img src="${thumbnail ? thumbnail.url : ''}" alt="サムネイル" style="width:120px; height:auto; margin-right: 10px;">
-                    <div>
-                        <strong>${title || 'タイトル不明'}</strong> (${videoId})<br>
-                        キャッシュインスタンス: ${instance}<br>
-                        有効期限まで: ${Math.floor(remainingTimeSeconds / 60)}分${remainingTimeSeconds % 60}秒
-                    </div>
-                </div>
-                <hr>`
         };
     });
 
@@ -343,9 +329,10 @@ app.get('/api/cache', (req, res) => {
                 body { font-family: sans-serif; line-height: 1.6; padding: 20px; }
                 h1 { border-bottom: 2px solid #ccc; padding-bottom: 10px; }
                 .cache-item { display: flex; align-items: center; margin-bottom: 20px; border: 1px solid #eee; padding: 10px; border-radius: 5px; }
-                .cache-item img { margin-right: 15px; border-radius: 3px; }
+                .cache-item img { margin-right: 15px; border-radius: 3px; width: 120px; height: auto; }
                 .cache-info { font-size: 0.9em; }
                 .cache-count { margin-bottom: 15px; font-weight: bold; }
+                a { text-decoration: none; color: #0070c9; }
             </style>
         </head>
         <body>
@@ -353,7 +340,7 @@ app.get('/api/cache', (req, res) => {
             <div class="cache-count">合計キャッシュ数: ${cachedVideos.length}</div>
             ${cachedVideos.map(item => `
                 <div class="cache-item">
-                    <img src="${item.thumbnailUrl}" alt="Thumbnail" style="width:120px;">
+                    <img src="${item.thumbnailUrl}" alt="Thumbnail">
                     <div class="cache-info">
                         <strong>${item.title}</strong> (${item.videoId})<br>
                         キャッシュ元: <a href="${item.instance}" target="_blank">${new URL(item.instance).hostname}</a><br>
