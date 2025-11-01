@@ -8,6 +8,7 @@ const videoCache = {};
 const CACHE_TTL = 4 * 60 * 60 * 1000;
 
 const INVIDIOUS_INSTANCES = [
+    'https://invidious.f5.si',
     'https://yt.omada.cafe',
     'https://inv.perditum.com',
     'https://iv.melmac.space',
@@ -188,57 +189,60 @@ app.get('/high/:id', async (req, res) => {
 
     const { formats, videoId: resultVideoId, instance } = result;
     
-    // 1. 動画トラック (H.264/MP4/1080p以下に厳格限定)
+    // 1. 動画トラック (H.264とVP9を許可し、H.264を優先)
     const videoTracks = formats
         .filter(f => f.trackType === 'video')
         .filter(f => {
-            if (f.itag === '399') {
-                console.log(`[${f.videoId}] itag 399 は邪魔だから消したぜ。`);
-                return false;
-            }
-
             if (f.resolutionHeight > 1080 || f.resolutionHeight === 0) return false;
 
             const encoding = (f.encoding || '').toLowerCase();
-            const container = (f.container || '').toLowerCase();
-
-            // H.264コーデックとMP4コンテナに厳格に限定
-            if (!encoding.includes('avc') && !encoding.includes('h.264')) {
-                return false;
-            }
-            if (container !== 'mp4') {
-                console.log(`[${f.videoId}] MP4じゃないコンテナ(${container})の動画トラックは除外したぜ。`);
-                return false;
+            
+            // H.264/AVCまたはVP9を許可
+            if (encoding.includes('avc') || encoding.includes('h.264') || encoding.includes('vp9')) {
+                return true;
             }
 
-            return true;
+            return false;
         })
         .sort((a, b) => {
+            // 1. 解像度の高いものを優先
             if (a.resolutionHeight !== b.resolutionHeight) {
                 return b.resolutionHeight - a.resolutionHeight; 
             }
+            
+            const aIsH264 = (a.encoding || '').toLowerCase().includes('avc') || (a.encoding || '').toLowerCase().includes('h.264');
+            const bIsH264 = (b.encoding || '').toLowerCase().includes('avc') || (b.encoding || '').toLowerCase().includes('h.264');
+
+            // 2. H.264をVP9より優先
+            if (aIsH264 && !bIsH264) return -1;
+            if (!aIsH264 && bIsH264) return 1;
+
+            // 3. それ以外はitagの降順で代用 (大体高画質なものが優先される)
             return parseInt(b.itag) - parseInt(a.itag);
         });
 
-    // 2. 音声トラック (AAC/MP4に厳格限定)
+    // 2. 音声トラック (AACとOpusを許可し、AACを優先)
     const audioTracks = formats
         .filter(f => f.trackType === 'audio')
         .filter(f => {
             const encoding = (f.encoding || '').toLowerCase();
-            const container = (f.container || '').toLowerCase();
-
-            // AACコーデックとMP4コンテナに厳格に限定
-            if (!encoding.includes('aac')) {
-                return false;
-            }
-            if (container !== 'mp4') {
-                console.log(`[${f.videoId}] MP4じゃないコンテナ(${container})の音声トラックは除外したぜ。`);
-                return false;
+            
+            // AACまたはOpusを許可
+            if (encoding.includes('aac') || encoding.includes('opus')) {
+                return true;
             }
 
-            return true;
+            return false;
         })
         .sort((a, b) => {
+            const aIsAAC = (a.encoding || '').toLowerCase().includes('aac');
+            const bIsAAC = (b.encoding || '').toLowerCase().includes('aac');
+
+            // 1. AACをOpusより優先
+            if (aIsAAC && !bIsAAC) return -1;
+            if (!aIsAAC && bIsAAC) return 1;
+
+            // 2. それ以外はitagの降順で代用
             return parseInt(b.itag) - parseInt(a.itag);
         });
     
@@ -246,36 +250,51 @@ app.get('/high/:id', async (req, res) => {
     const bestAudio = audioTracks[0] || null;
 
     if (bestVideo && bestAudio) {
+        const videoType = (bestVideo.encoding || '').includes('vp9') ? 'VP9/WebM' : 'H.264/MP4';
+        const audioType = (bestAudio.encoding || '').includes('opus') ? 'Opus/WebM' : 'AAC/MP4';
+        
+        console.log(`[${videoId}] 動画：${bestVideo.itag} (${videoType})、音声：${bestAudio.itag} (${audioType})を選んだぜ。`);
+
         const finalResponse = {
             success: true,
             videoId: resultVideoId,
             instance: instance,
-            message: "タブレット互換性最優先！H.264/MP4とAAC/MP4で厳選したペアだぜ。",
+            message: `互換性と画質を考慮し、最も適した分離トラックのペア（${videoType} + ${audioType}）を選んだぜ。`,
             video: bestVideo, 
             audio: bestAudio  
         };
         return res.status(200).json(finalResponse);
     } 
     
-    console.warn(`[${videoId}] 厳格なMP4分離トラックペアが見つからなかったぜ。複合トラックを探す。`);
+    console.warn(`[${videoId}] 分離トラックペア（H.264/VP9とAAC/Opus）が見つからなかったぜ。複合トラックを探す。`);
     
-    // 3. 代替の複合トラックのフィルタリング (MP4に限定)
+    // 3. 代替の複合トラックのフィルタリング (MP4を優先)
     const combinedTrack = formats
         .filter(f => f.trackType === 'combined')
         .filter(f => {
-            // 複合トラックもMP4コンテナに限定
-            return f.resolutionHeight > 0 && f.resolutionHeight <= 1080 && (f.container || '').toLowerCase() === 'mp4';
+            return f.resolutionHeight > 0 && f.resolutionHeight <= 1080;
         })
         .sort((a, b) => {
-            return b.resolutionHeight - a.resolutionHeight;
+            // 1. 解像度が高いものを優先
+            if (a.resolutionHeight !== b.resolutionHeight) {
+                return b.resolutionHeight - a.resolutionHeight; 
+            }
+            // 2. MP4コンテナをWebMコンテナより優先
+            const aIsMp4 = (a.container || '').toLowerCase() === 'mp4';
+            const bIsMp4 = (b.container || '').toLowerCase() === 'mp4';
+            if (aIsMp4 && !bIsMp4) return -1;
+            if (!aIsMp4 && bIsMp4) return 1;
+            
+            return parseInt(b.itag) - parseInt(a.itag);
         })[0] || null;
 
     if (combinedTrack) {
+        const containerType = (combinedTrack.container || '').toUpperCase();
         const finalResponse = {
             success: true,
             videoId: resultVideoId,
             instance: instance,
-            message: "分離トラックが見つからなかったから、代替として最も高画質なMP4複合トラック(1080p以下)を返すぜ。",
+            message: `分離トラックが見つからなかったから、代替として最も高画質な複合トラック(${containerType}/1080p以下)を返すぜ。`,
             combined: combinedTrack
         };
         return res.status(200).json(finalResponse);
@@ -283,9 +302,9 @@ app.get('/high/:id', async (req, res) => {
     
     return res.status(404).json({ 
         success: false, 
-        error: `動画ID ${videoId} のストリームは、タブレット互換性の高いMP4トラックが一つも見つからなかったぜ。`,
+        error: `動画ID ${videoId} のストリームは、タブレット互換性の高いトラックが一つも見つからなかったぜ。`,
         details: {
-            message: "MP4コンテナの分離トラック、またはMP4複合トラックが見つからなかった。",
+            message: "互換性の高い分離トラック（H.264/VP9 + AAC/Opus）のペアも、互換性の高い複合トラックも見つからなかった。",
             videoFound: !!bestVideo,
             audioFound: !!bestAudio,
             combinedFound: !!combinedTrack
