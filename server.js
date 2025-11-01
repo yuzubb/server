@@ -1,13 +1,11 @@
 import fetch from 'node-fetch';
 import express from 'express';
 
-const app = express();
+const app = express.Router();
 const PORT = process.env.PORT || 3000;
 
-// ⭐ キャッシュストアの定義
 const videoCache = {};
-// ⭐ キャッシュの有効期限を4時間 (ミリ秒) に設定
-const CACHE_TTL = 4 * 60 * 60 * 1000; // 4 hours in milliseconds
+const CACHE_TTL = 4 * 60 * 60 * 1000;
 
 const INVIDIOUS_INSTANCES = [
     'https://invidious.f5.si',
@@ -21,9 +19,6 @@ const INVIDIOUS_INSTANCES = [
     'https://lekker.gay',
 ];
 
-/**
- * Invidiousレスポンスのフォーマットオブジェクトを、より汎用的な構造に変換し、トラックタイプを判別する。
- */
 function normalizeFormat(format) {
     const hasResolution = !!format.resolution || !!format.qualityLabel;
     const hasAudioQuality = !!format.audioQuality || !!(format.quality && format.quality.includes('audio'));
@@ -39,31 +34,26 @@ function normalizeFormat(format) {
 
     const resolution = format.resolution || (format.qualityLabel ? format.qualityLabel.match(/(\d+p)/)?.[1] : null);
     
-    // 解像度の高さを数値で取得 (例: '1080p' -> 1080)
     const height = resolution ? parseInt(resolution.replace('p', '')) : 0;
 
     return {
         videoUrl: format.url,
-        itag: format.itag, // 情報を残すためitagは含める
+        itag: format.itag,
         qualityLabel: format.qualityLabel || format.quality,
         resolution: format.resolution,
         resolutionHeight: height,
         container: format.container,
         encoding: format.encoding,
         trackType: trackType,
-        audioQuality: format.audioQuality // 音声トラック選定のため含める
+        audioQuality: format.audioQuality
     };
 }
 
-
-// ----------------------------------------------------
-// getAllFormats 関数 (キャッシュ処理を含む)
-// ----------------------------------------------------
 async function getAllFormats(videoId) {
 
     const cachedItem = videoCache[videoId];
     if (cachedItem && (Date.now() < cachedItem.timestamp + CACHE_TTL)) {
-        console.log(`[${videoId}] キャッシュから取得したよ。`);
+        console.log(`[${videoId}] キャッシュから取得したぜ。`);
         return cachedItem.data;
     }
 
@@ -71,7 +61,7 @@ async function getAllFormats(videoId) {
         const apiUrl = `${baseUrl}/api/v1/videos/${videoId}`;
 
         try {
-            console.log(`[${videoId}] インスタンス試すよ: ${baseUrl}`);
+            console.log(`[${videoId}] インスタンス試すぜ: ${baseUrl}`);
             
             const controller = new AbortController();
             const timeoutId = setTimeout(() => controller.abort(), 7000);
@@ -80,7 +70,7 @@ async function getAllFormats(videoId) {
             clearTimeout(timeoutId);
 
             if (!response.ok) {
-                console.warn(`[${videoId}] ${baseUrl}から${response.status}って返ってきたわ。次行くね`);
+                console.warn(`[${videoId}] ${baseUrl}から${response.status}って返ってきたわ。次行くぜ`);
                 continue;
             }
 
@@ -98,7 +88,7 @@ async function getAllFormats(videoId) {
                     .filter(f => f.trackType !== 'unknown');
                 
                 if (normalizedFormats.length > 0) {
-                    console.log(`[${videoId}] やった！${baseUrl}で${normalizedFormats.length}個のフォーマットを見つけたよ`);
+                    console.log(`[${videoId}] やった！${baseUrl}で${normalizedFormats.length}個のフォーマットを見つけたぜ`);
                     
                     const result = {
                         success: true,
@@ -116,29 +106,26 @@ async function getAllFormats(videoId) {
                     
                     return result;
                 } else {
-                    console.log(`[${videoId}] ${baseUrl}には有効なフォーマットが無かったわ。次行くわ`);
+                    console.log(`[${videoId}] ${baseUrl}には有効なフォーマットが無かったわ。次行くぜ`);
                 }
             } else {
-                console.warn(`[${videoId}] ${baseUrl}から変なデータ返ってきたわ`);
+                console.warn(`[${videoId}] ${baseUrl}から変なデータ返ってきたぜ`);
             }
 
         } catch (error) {
-            console.error(`[${videoId}] ${baseUrl}でエラー出た: ${error.message}`);
+            console.error(`[${videoId}] ${baseUrl}でエラー出たぜ: ${error.message}`);
         }
     }
 
     return null;
 }
 
-// ----------------------------------------------------
-// /stream/:id エンドポイント (変更なし)
-// ----------------------------------------------------
 app.get('/stream/:id', async (req, res) => {
     const videoId = req.params.id;
 
     if (!videoId) {
         return res.status(400).json({ 
-            error: 'videoIdが必要だよ。/stream/:id の形式でリクエストしてね。' 
+            error: 'videoIdが必要だぜ。/stream/:id の形式でリクエストしてくれ。' 
         });
     }
 
@@ -147,13 +134,12 @@ app.get('/stream/:id', async (req, res) => {
     if (!result) {
         return res.status(404).json({ 
             success: false, 
-            error: `動画ID ${videoId} のストリームはどこにも無かったよ。` 
+            error: `動画ID ${videoId} のストリームはどこにも無かったぜ。` 
         });
     }
 
     const { formats } = result;
     
-    // 互換性優先ロジック: 複合トラック (360p付近) を探す。
     const combinedTracks = formats.filter(f => f.trackType === 'combined');
     
     let bestCombined = null;
@@ -169,7 +155,7 @@ app.get('/stream/:id', async (req, res) => {
             success: result.success,
             videoId: result.videoId,
             instance: result.instance,
-            message: "互換性を最優先し、複合トラック（360p付近）を厳選しました。",
+            message: "互換性を最優先し、複合トラック（360p付近）を厳選したぜ。",
             formats: [bestCombined]
         });
     }
@@ -178,20 +164,17 @@ app.get('/stream/:id', async (req, res) => {
         success: result.success,
         videoId: result.videoId,
         instance: result.instance,
-        message: "複合トラックが見つからなかったため、利用可能な全てのトラックを返します。",
+        message: "複合トラックが見つからなかったから、利用可能な全てのトラックを返すぜ。",
         formats: formats
     });
 });
 
-// ----------------------------------------------------
-// /high/:id エンドポイント (itag 399/VP9を厳格に除外)
-// ----------------------------------------------------
 app.get('/high/:id', async (req, res) => {
     const videoId = req.params.id;
 
     if (!videoId) {
         return res.status(400).json({ 
-            error: 'videoIdが必要だよ。/high/:id の形式でリクエストしてね。' 
+            error: 'videoIdが必要だぜ。/high/:id の形式でリクエストしてくれ。' 
         });
     }
 
@@ -200,49 +183,56 @@ app.get('/high/:id', async (req, res) => {
     if (!result) {
         return res.status(404).json({ 
             success: false, 
-            error: `動画ID ${videoId} のストリームはどこにも無かったよ。` 
+            error: `動画ID ${videoId} のストリームはどこにも無かったぜ。` 
         });
     }
 
     const { formats, videoId: resultVideoId, instance } = result;
     
-    // 1. 分離トラック (Video) の厳選とフィルタリング
     const videoTracks = formats
         .filter(f => f.trackType === 'video')
         .filter(f => {
-            // ⭐ フィルタリング強化:
-            
-            // 1. itag 399を明示的に除外 (報告されたデータが1080pでも確実に避けるため)
             if (f.itag === '399') {
-                console.log(`[${f.videoId}] itag 399 を明示的に除外しました。`);
+                console.log(`[${f.videoId}] itag 399 は邪魔だから消したぜ。`);
                 return false;
             }
 
-            // 2. 1080p以下に限定 (2160pなど高解像度を除外)
             if (f.resolutionHeight > 1080 || f.resolutionHeight === 0) return false;
 
-            // 3. VP9コーデックを明示的に除外 (互換性の低い1080p VP9/itag248などを除外)
             const encoding = (f.encoding || '').toLowerCase();
-            if (encoding.includes('vp9') || f.container === 'webm') {
-                console.log(`[${f.videoId}] VP9/WebMトラック (${f.resolutionHeight}p) を互換性のため除外しました。`);
+            const container = (f.container || '').toLowerCase();
+
+            if (!encoding.includes('avc') && !encoding.includes('h.264')) {
+                return false;
+            }
+            if (container !== 'mp4') {
                 return false;
             }
 
-            // H.264やHEVCの1080p以下のみが残る
             return true;
         })
         .sort((a, b) => {
-            // 1. 解像度の高いものを優先
             if (a.resolutionHeight !== b.resolutionHeight) {
                 return b.resolutionHeight - a.resolutionHeight; 
             }
-            
-            // 2. エンコーディングが同じ場合、itagの降順で代用 (品質の微差を考慮)
             return parseInt(b.itag) - parseInt(a.itag);
         });
 
     const audioTracks = formats
         .filter(f => f.trackType === 'audio')
+        .filter(f => {
+            const encoding = (f.encoding || '').toLowerCase();
+            const container = (f.container || '').toLowerCase();
+
+            if (!encoding.includes('aac')) {
+                return false;
+            }
+            if (container !== 'mp4') {
+                return false;
+            }
+
+            return true;
+        })
         .sort((a, b) => {
             return parseInt(b.itag) - parseInt(a.itag);
         });
@@ -250,30 +240,26 @@ app.get('/high/:id', async (req, res) => {
     const bestVideo = videoTracks[0] || null;
     const bestAudio = audioTracks[0] || null;
 
-    // 2. 分離トラックのペアが見つかったかどうかのチェック
     if (bestVideo && bestAudio) {
         const finalResponse = {
             success: true,
             videoId: resultVideoId,
             instance: instance,
-            message: "最高画質(1080p以下, H.264/HEVC優先)と最高音質の分離トラックを1つずつ厳選しました。これらを結合して再生してください。",
+            message: "互換性最優先（H.264/AAC/MP4）で厳選した分離トラックのペアだぜ。",
             video: bestVideo, 
             audio: bestAudio  
         };
         return res.status(200).json(finalResponse);
     } 
     
-    // 3. 分離トラックのペアが見つからなかった場合の代替処理 (複合トラックの提供)
-    console.warn(`[${videoId}] 分離トラックのペアが見つかりませんでした。複合トラックを探します。`);
+    console.warn(`[${videoId}] 互換性最優先の分離トラックペア（H.264/AAC/MP4）は見つからなかったぜ。`);
     
     const combinedTrack = formats
         .filter(f => f.trackType === 'combined')
         .filter(f => {
-            // 複合トラックも1080p以下に制限
-            return f.resolutionHeight > 0 && f.resolutionHeight <= 1080;
+            return f.resolutionHeight > 0 && f.resolutionHeight <= 1080 && (f.container || '').toLowerCase() === 'mp4';
         })
         .sort((a, b) => {
-            // 複合トラックは解像度降順で優先
             return b.resolutionHeight - a.resolutionHeight;
         })[0] || null;
 
@@ -282,18 +268,17 @@ app.get('/high/:id', async (req, res) => {
             success: true,
             videoId: resultVideoId,
             instance: instance,
-            message: "分離トラックが見つからなかったため、代替として最も高画質な複合トラック(1080p以下)を返します。",
+            message: "互換性最優先の分離トラックが見つからなかったから、代替として最も高画質な複合トラック(MP4/1080p以下)を返すぜ。",
             combined: combinedTrack
         };
         return res.status(200).json(finalResponse);
     }
     
-    // 4. 複合トラックも見つからなかった場合、最終的なエラーを返す
     return res.status(404).json({ 
         success: false, 
-        error: `動画ID ${videoId} のストリームは、分離トラックも複合トラックも全く見つかりませんでした。`,
+        error: `動画ID ${videoId} のストリームは、タブレット互換性の高いトラックが一つも見つからなかったぜ。`,
         details: {
-            message: "動画トラック、音声トラック、複合トラックのいずれも見つかりませんでした。",
+            message: "H.264/AAC/MP4の分離トラック、または互換性の高い複合トラックが見つからなかった。",
             videoFound: !!bestVideo,
             audioFound: !!bestAudio,
             combinedFound: !!combinedTrack
@@ -301,9 +286,6 @@ app.get('/high/:id', async (req, res) => {
     });
 });
 
-// ----------------------------------------------------
-// /api/cache エンドポイントの追加 (変更なし)
-// ----------------------------------------------------
 app.get('/api/cache', (req, res) => {
     const cachedVideos = Object.keys(videoCache).map(videoId => {
         const item = videoCache[videoId];
@@ -360,13 +342,6 @@ app.get('/api/cache', (req, res) => {
     res.status(200).send(htmlOutput);
 });
 
-// ------------------------------------------
-
-app.get('/', (req, res) => {
-    res.status(200).send('Invidious Proxyは動いてるよ。動画データが欲しいなら /stream/:id (互換性重視) または /high/:id (最高画質/音質の分離を厳選) を使ってね。<br>キャッシュ一覧は <a href="/api/cache">/api/cache</a> で確認できるよ。');
-});
-
-
-app.listen(PORT, () => {
-    console.log(`サーバーはポート${PORT}で起動したよ！`);
+express().use('/', app).listen(PORT, () => {
+    console.log(`サーバーはポート${PORT}で起動したぜ！`);
 });
