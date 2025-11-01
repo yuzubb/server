@@ -8,7 +8,6 @@ const videoCache = {};
 const CACHE_TTL = 4 * 60 * 60 * 1000;
 
 const INVIDIOUS_INSTANCES = [
-    'https://invidious.f5.si',
     'https://yt.omada.cafe',
     'https://inv.perditum.com',
     'https://iv.melmac.space',
@@ -178,10 +177,11 @@ app.get('/high/:id', async (req, res) => {
         });
     }
 
-    const API_URL = `https://siawaseok.f5.si/api/streams/${videoId}`;
+    // ユーザーの要望に基づき、外部APIのURLを変更
+    const API_URL = `https://siawaseok.duckdns.org/api/stream/${videoId}/type2`;
 
     try {
-        console.log(`[${videoId}] 新しいAPIを試します: ${API_URL}`);
+        console.log(`[${videoId}] 新しいAPI (type2) を試します: ${API_URL}`);
         
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), 7000);
@@ -191,7 +191,7 @@ app.get('/high/:id', async (req, res) => {
 
         if (!response.ok) {
             console.error(`[${videoId}] ${API_URL}から${response.status}が返されました。`);
-            return res.status(response.status).json({ 
+            return res.status(502).json({ 
                 success: false, 
                 error: `ストリーム情報取得に失敗しました。ステータスコード: ${response.status}` 
             });
@@ -199,50 +199,45 @@ app.get('/high/:id', async (req, res) => {
 
         const data = await response.json();
         
-        if (!data || !data.formats || data.formats.length === 0) {
+        // type2形式の構造 (m3u8フィールド) をチェック
+        if (!data || !data.m3u8) {
             return res.status(404).json({ 
                 success: false, 
-                error: `動画ID ${videoId} の有効なフォーマットは見つかりませんでした。` 
+                error: `動画ID ${videoId} の有効な type2 形式の m3u8 フォーマットは見つかりませんでした。` 
             });
         }
         
-        const formats = data.formats;
+        const m3u8Formats = data.m3u8;
         
-        const getResolutionHeight = (format) => {
-            const resString = format.resolution || format.qualityLabel || '';
-            const resMatch = resString.match(/(\d+)/); 
-            return resMatch ? parseInt(resMatch[1]) : 0;
-        };
-
-        const manifestFormats = formats.filter(f => f.manifest && f.manifest.includes('.m3u8')); 
-        
-        if (manifestFormats.length === 0) {
-             return res.status(404).json({ 
-                success: false, 
-                error: `動画ID ${videoId} のHLS (m3u8) マニフェストは見つかりませんでした。` 
-            });
-        }
-        
-        let bestManifestFormat = null;
+        let bestM3u8Url = null;
         let maxResolutionHeight = -1;
+        let bestResolutionLabel = null;
         
-        for (const format of manifestFormats) {
-            const height = getResolutionHeight(format);
+        // m3u8Formats (例: {"256p": { ... }, "1280p": { ... }}) を反復処理し、最高画質のURLを抽出
+        for (const resolutionLabel in m3u8Formats) {
+            // 解像度ラベルから数値 (例: "1280p" -> 1280) を抽出
+            const resMatch = resolutionLabel.match(/(\d+)/); 
+            const height = resMatch ? parseInt(resMatch[1]) : 0;
             
             if (height > maxResolutionHeight) {
-                maxResolutionHeight = height;
-                bestManifestFormat = format;
+                // URLの取得パスは m3u8Formats[resolutionLabel].url.url を想定
+                const currentUrl = m3u8Formats[resolutionLabel]?.url?.url; 
+                
+                if (currentUrl) {
+                    maxResolutionHeight = height;
+                    bestM3u8Url = currentUrl;
+                    bestResolutionLabel = resolutionLabel;
+                }
             }
         }
         
-        if (bestManifestFormat) {
-            const m3u8Url = bestManifestFormat.manifest;
+        if (bestM3u8Url) {
             
-            console.log(`[${videoId}] 最高画質のm3u8 URL (${maxResolutionHeight}p) を取得し、コンテンツをプロキシします。`);
+            console.log(`[${videoId}] 最高画質のm3u8 URL (${bestResolutionLabel}) を取得し、コンテンツをプロキシします。`);
             
-            // --- M3U8コンテンツを直接取得してクライアントに返す ---
+            // M3U8コンテンツを直接取得してクライアントに返す (プロキシ処理)
             try {
-                const manifestResponse = await fetch(m3u8Url);
+                const manifestResponse = await fetch(bestM3u8Url);
 
                 if (!manifestResponse.ok) {
                     console.error(`[${videoId}] M3U8マニフェストの取得に失敗しました: ${manifestResponse.status}`);
@@ -252,12 +247,9 @@ app.get('/high/:id', async (req, res) => {
                     });
                 }
 
-                // Content-TypeをM3U8マニフェストとして設定
                 res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
-                // キャッシュのヒントを設定
                 res.setHeader('Cache-Control', 'public, max-age=3600'); 
                 
-                // M3U8ファイルのコンテンツを直接レスポンスとして返す
                 const manifestContent = await manifestResponse.text();
                 return res.status(200).send(manifestContent);
                 
@@ -269,12 +261,96 @@ app.get('/high/:id', async (req, res) => {
                     details: fetchError.message 
                 });
             }
-            // --- 変更終了 ---
         }
 
         return res.status(404).json({ 
             success: false, 
-            error: `動画ID ${videoId} のストリームは、一つも見つからなかったぜ。`
+            error: `動画ID ${videoId} のM3U8ストリームは、一つも見つからなかったぜ。`
+        });
+
+    } catch (error) {
+        console.error(`[${videoId}] ストリーム情報取得中にエラーが発生しました: ${error.message}`);
+        return res.status(500).json({ 
+            success: false, 
+            error: 'サーバー側でエラーが発生しました。', 
+            details: error.message 
+        });
+    }
+});
+
+app.get('/api/stream/:id/type2', async (req, res) => {
+    const videoId = req.params.id;
+
+    if (!videoId) {
+        return res.status(400).json({ 
+            error: 'videoIdが必要です。/api/stream/:id/type2 の形式でリクエストしてください。' 
+        });
+    }
+
+    const API_URL = `https://siawaseok.f5.si/api/streams/${videoId}`;
+
+    try {
+        console.log(`[${videoId}] type2データ取得を試みます: ${API_URL}`);
+        
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 7000);
+
+        const response = await fetch(API_URL, { signal: controller.signal });
+        clearTimeout(timeoutId);
+
+        if (!response.ok) {
+            console.error(`[${videoId}] ${API_URL}から${response.status}が返されました。`);
+            return res.status(502).json({ 
+                success: false, 
+                error: `ストリーム情報取得に失敗しました。ステータスコード: ${response.status}` 
+            });
+        }
+
+        const data = await response.json();
+        
+        if (!data || !data.m3u8) {
+            return res.status(404).json({ 
+                success: false, 
+                error: `動画ID ${videoId} の有効な type2 形式のフォーマットは見つかりませんでした。` 
+            });
+        }
+        
+        const m3u8Formats = data.m3u8;
+        
+        let bestM3u8Url = null;
+        let maxResolutionHeight = -1;
+        let bestResolutionLabel = null;
+        
+        for (const resolutionLabel in m3u8Formats) {
+            const resMatch = resolutionLabel.match(/(\d+)/); 
+            const height = resMatch ? parseInt(resMatch[1]) : 0;
+            
+            if (height > maxResolutionHeight) {
+                const currentUrl = m3u8Formats[resolutionLabel]?.url?.url; 
+                
+                if (currentUrl) {
+                    maxResolutionHeight = height;
+                    bestM3u8Url = currentUrl;
+                    bestResolutionLabel = resolutionLabel;
+                }
+            }
+        }
+        
+        if (bestM3u8Url) {
+            console.log(`[${videoId}] 最高画質のm3u8 URL (${bestResolutionLabel}) を抽出したぜ。`);
+            
+            return res.status(200).json({
+                success: true,
+                videoId: videoId,
+                resolution: bestResolutionLabel,
+                m3u8Url: bestM3u8Url,
+                message: `最高画質のHLS (m3u8) マニフェストURL (${bestResolutionLabel}) を抽出したぜ。`
+            });
+        }
+
+        return res.status(404).json({ 
+            success: false, 
+            error: `動画ID ${videoId} のM3U8ストリームは、一つも見つからなかったぜ。`
         });
 
     } catch (error) {
@@ -333,6 +409,7 @@ app.get('/api/cache', (req, res) => {
                         キャッシュ日時: ${new Date(item.cachedAt).toLocaleString()}<br>
                         有効期限まで: <span style="color:${item.expiresInSeconds < 600 ? 'red' : 'green'};">${Math.floor(item.expiresInSeconds / 3600)}時間${Math.floor((item.expiresInSeconds % 3600) / 60)}分${item.expiresInSeconds % 60}秒</span>
                         <br><a href="/high/${item.videoId}" target="_blank">/high/${item.videoId}</a>
+                        <br><a href="/api/stream/${item.videoId}/type2" target="_blank">/api/stream/${item.videoId}/type2</a>
                     </div>
                 </div>
             `).join('')}
