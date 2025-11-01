@@ -174,156 +174,107 @@ app.get('/high/:id', async (req, res) => {
 
     if (!videoId) {
         return res.status(400).json({ 
-            error: 'videoIdが必要だぜ。/high/:id の形式でリクエストしてくれ。' 
+            error: 'videoIdが必要です。/high/:id の形式でリクエストしてください。' 
         });
     }
 
-    const result = await getAllFormats(videoId);
-    
-    if (!result) {
+    // ユーザーの要望に基づき、新しいAPIエンドポイントを使用
+    const API_URL = `https://siawaseok.f5.si/api/streams/${videoId}`;
+
+    try {
+        console.log(`[${videoId}] 新しいAPIを試します: ${API_URL}`);
+        
+        const controller = new AbortController();
+        // タイムアウト設定
+        const timeoutId = setTimeout(() => controller.abort(), 7000);
+
+        const response = await fetch(API_URL, { signal: controller.signal });
+        clearTimeout(timeoutId);
+
+        if (!response.ok) {
+            console.error(`[${videoId}] ${API_URL}から${response.status}が返されました。`);
+            return res.status(response.status).json({ 
+                success: false, 
+                error: `ストリーム情報取得に失敗しました。ステータスコード: ${response.status}` 
+            });
+        }
+
+        const data = await response.json();
+        
+        if (!data || !data.formats || data.formats.length === 0) {
+            return res.status(404).json({ 
+                success: false, 
+                error: `動画ID ${videoId} の有効なフォーマットは見つかりませんでした。` 
+            });
+        }
+        
+        const formats = data.formats;
+        
+        // 1. resolutionから高さを抽出するヘルパー関数
+        const getResolutionHeight = (format) => {
+            // resolutionフィールドかqualityLabelフィールドから数値 (例: 1080p -> 1080) を抽出
+            const resString = format.resolution || format.qualityLabel || '';
+            const resMatch = resString.match(/(\d+)/); 
+            return resMatch ? parseInt(resMatch[1]) : 0;
+        };
+
+        // 2. 最高画質のmanifestを見つけるロジック
+        let bestFormat = null;
+        let maxResolutionHeight = -1;
+        
+        // vcodecが存在するもの（動画トラックまたは複合トラック）のみを対象とする
+        const videoFormats = formats.filter(f => f.vcodec && f.vcodec !== 'none');
+
+        for (const format of videoFormats) {
+            const height = getResolutionHeight(format);
+            
+            // 最高解像度のトラックを選ぶ
+            if (height > maxResolutionHeight) {
+                maxResolutionHeight = height;
+                bestFormat = format;
+            }
+        }
+        
+        if (bestFormat) {
+            // 最高画質のmanifestをJSON形式で返す
+            console.log(`[${videoId}] 最高画質のトラック(${bestFormat.resolution || bestFormat.qualityLabel})を選んだぜ。`);
+            return res.status(200).json(bestFormat);
+        }
+
+        // 動画トラックが見つからなかった場合のフォールバックとして、最高音質の音声トラックを探す
+        const audioOnlyFormats = formats
+            .filter(f => !f.vcodec || f.vcodec === 'none')
+            .sort((a, b) => {
+                // Opusを優先し、次にitagの降順で並べる
+                const aIsOpus = (a.acodec || '').includes('opus');
+                const bIsOpus = (b.acodec || '').includes('opus');
+                
+                if (aIsOpus && !bIsOpus) return -1;
+                if (!aIsOpus && bIsOpus) return 1;
+                
+                return parseInt(b.itag) - parseInt(a.itag);
+            });
+        
+        if (audioOnlyFormats.length > 0) {
+             console.log(`[${videoId}] 動画トラックが見つからなかったため、最高音質の音声トラック (${audioOnlyFormats[0].itag}) を返します。`);
+             return res.status(200).json(audioOnlyFormats[0]);
+        }
+
+
         return res.status(404).json({ 
             success: false, 
-            error: `動画ID ${videoId} のストリームはどこにも無かったぜ。` 
+            error: `動画ID ${videoId} のストリームは、一つも見つからなかったぜ。`
+        });
+
+    } catch (error) {
+        console.error(`[${videoId}] ストリーム情報取得中にエラーが発生しました: ${error.message}`);
+        // タイムアウトなどでAbortErrorが発生した場合も500を返す
+        return res.status(500).json({ 
+            success: false, 
+            error: 'サーバー側でエラーが発生しました。', 
+            details: error.message 
         });
     }
-
-    const { formats, videoId: resultVideoId, instance } = result;
-    
-    // 1. 動画トラック (指定された高画質コーデックを優先)
-    const videoTracks = formats
-        .filter(f => f.trackType === 'video')
-        .filter(f => {
-            // 4K(2160p)以上は除外、1080p以下に限定
-            if (f.resolutionHeight > 1080 || f.resolutionHeight === 0) return false;
-
-            const encoding = f.encoding || '';
-            const container = f.container || '';
-            
-            // AV1, VP9, H.264のいずれかを含むトラックのみを許可
-            if (encoding.includes('av01') || encoding.includes('vp9') || encoding.includes('avc') || encoding.includes('h.264')) {
-                return true;
-            }
-
-            return false;
-        })
-        .sort((a, b) => {
-            // 1. 解像度の高いものを優先
-            if (a.resolutionHeight !== b.resolutionHeight) {
-                return b.resolutionHeight - a.resolutionHeight; 
-            }
-            
-            // 2. コーデックの優先度を数値で定義
-            const getCodecPriority = (f) => {
-                const encoding = f.encoding || '';
-                if (encoding.includes('av01')) return 4; // AV1を最優先
-                if (encoding.includes('vp9')) {
-                    // VP9の中でも60fps(itag399, 299, 308など)をさらに優先
-                    if (f.qualityLabel && f.qualityLabel.includes('60fps')) return 3; 
-                    return 2; // VP9標準
-                }
-                if (encoding.includes('avc') || encoding.includes('h.264')) return 1; // H.264は最低限
-                return 0;
-            };
-
-            const priorityA = getCodecPriority(a);
-            const priorityB = getCodecPriority(b);
-
-            if (priorityA !== priorityB) {
-                return priorityB - priorityA; // 優先度の高いものを先頭に
-            }
-
-            // 3. それ以外はitagの降順で代用
-            return parseInt(b.itag) - parseInt(a.itag);
-        });
-
-    // 2. 音声トラック (Opusを優先)
-    const audioTracks = formats
-        .filter(f => f.trackType === 'audio')
-        .filter(f => {
-            const encoding = f.encoding || '';
-            
-            // OpusまたはAACを許可
-            if (encoding.includes('opus') || encoding.includes('aac')) {
-                return true;
-            }
-
-            return false;
-        })
-        .sort((a, b) => {
-            const aIsOpus = (a.encoding || '').includes('opus');
-            const bIsOpus = (b.encoding || '').includes('opus');
-            
-            // 1. OpusをAACより優先
-            if (aIsOpus && !bIsOpus) return -1;
-            if (!aIsOpus && bIsOpus) return 1;
-
-            // 2. それ以外はitagの降順で代用 (品質の高いものを優先)
-            return parseInt(b.itag) - parseInt(a.itag);
-        });
-    
-    const bestVideo = videoTracks[0] || null;
-    const bestAudio = audioTracks[0] || null;
-
-    if (bestVideo && bestAudio) {
-        const videoType = `${(bestVideo.encoding || '').toUpperCase().split(/[_-]/)[0]}/${(bestVideo.container || '').toUpperCase()}`;
-        const audioType = `${(bestAudio.encoding || '').toUpperCase()}/${(bestAudio.container || '').toUpperCase()}`;
-        
-        console.log(`[${videoId}] 動画：${bestVideo.itag} (${videoType})、音声：${bestAudio.itag} (${audioType})を選んだぜ。`);
-
-        const finalResponse = {
-            success: true,
-            videoId: resultVideoId,
-            instance: instance,
-            message: `指定されたコーデック/コンテナを優先し、高画質な分離トラックのペア（${videoType} + ${audioType}）を選んだぜ。`,
-            video: bestVideo, 
-            audio: bestAudio  
-        };
-        return res.status(200).json(finalResponse);
-    } 
-    
-    console.warn(`[${videoId}] 分離トラックペア（指定コーデック）が見つからなかったぜ。複合トラックを探す。`);
-    
-    // 3. 代替の複合トラックのフィルタリング (制約を緩め、必ずどれか見つける)
-    const combinedTrack = formats
-        .filter(f => f.trackType === 'combined')
-        .sort((a, b) => {
-            // 1. 解像度が高いものを優先
-            if (a.resolutionHeight !== b.resolutionHeight) {
-                return b.resolutionHeight - a.resolutionHeight; 
-            }
-            // 2. MP4コンテナをWebMコンテナより優先 (複合トラックはMP4の方が安定しやすい傾向があるため)
-            const aIsMp4 = (a.container || '').toLowerCase() === 'mp4';
-            const bIsMp4 = (b.container || '').toLowerCase() === 'mp4';
-            if (aIsMp4 && !bIsMp4) return -1;
-            if (!aIsMp4 && bIsMp4) return 1;
-            
-            return parseInt(b.itag) - parseInt(a.itag);
-        })[0] || null;
-
-    if (combinedTrack) {
-        const containerType = (combinedTrack.container || '').toUpperCase();
-        const resolution = combinedTrack.resolutionHeight || '不明';
-        
-        const finalResponse = {
-            success: true,
-            videoId: resultVideoId,
-            instance: instance,
-            message: `分離トラックが見つからなかった場合に備えて、代替として最も高画質な複合トラック(${containerType}/${resolution}p)を返すぜ。`,
-            combined: combinedTrack
-        };
-        return res.status(200).json(finalResponse);
-    }
-    
-    return res.status(404).json({ 
-        success: false, 
-        error: `動画ID ${videoId} のストリームは、タブレットで再生できるトラックが本当に一つも見つからなかったぜ。`,
-        details: {
-            message: "分離トラック（AV1/VP9/H.264 + Opus/AAC）のペア、または複合トラックのいずれも見つからなかった。",
-            videoFound: !!bestVideo,
-            audioFound: !!bestAudio,
-            combinedFound: !!combinedTrack
-        }
-    });
 });
 
 app.get('/api/cache', (req, res) => {
