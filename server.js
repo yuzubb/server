@@ -189,6 +189,7 @@ app.get('/high/:id', async (req, res) => {
 
     const { formats, videoId: resultVideoId, instance } = result;
     
+    // 1. 動画トラック (H.264/MP4/1080p以下に厳格限定)
     const videoTracks = formats
         .filter(f => f.trackType === 'video')
         .filter(f => {
@@ -218,22 +219,29 @@ app.get('/high/:id', async (req, res) => {
             return parseInt(b.itag) - parseInt(a.itag);
         });
 
+    // 2. 音声トラック (互換性の高いAAC/MP4を優先しつつ、Opusも許容)
     const audioTracks = formats
         .filter(f => f.trackType === 'audio')
         .filter(f => {
             const encoding = (f.encoding || '').toLowerCase();
             const container = (f.container || '').toLowerCase();
 
-            if (!encoding.includes('aac')) {
-                return false;
-            }
-            if (container !== 'mp4') {
-                return false;
+            // AAC (itag140など) または Opus (itag251など) のみを許可
+            if (encoding.includes('aac') || encoding.includes('opus')) {
+                return true;
             }
 
-            return true;
+            return false;
         })
         .sort((a, b) => {
+            // AAC (itag140) を優先するため、AAC判定に高いスコアを与える
+            const aIsAAC = (a.encoding || '').toLowerCase().includes('aac');
+            const bIsAAC = (b.encoding || '').toLowerCase().includes('aac');
+
+            if (aIsAAC && !bIsAAC) return -1;
+            if (!aIsAAC && bIsAAC) return 1;
+
+            // それ以外はitagの降順で代用 (Opusトラックの品質を優先)
             return parseInt(b.itag) - parseInt(a.itag);
         });
     
@@ -245,18 +253,20 @@ app.get('/high/:id', async (req, res) => {
             success: true,
             videoId: resultVideoId,
             instance: instance,
-            message: "互換性最優先（H.264/AAC/MP4）で厳選した分離トラックのペアだぜ。",
+            message: "H.264動画と互換性の高い音声トラック（AAC優先）で厳選したペアだぜ。",
             video: bestVideo, 
             audio: bestAudio  
         };
         return res.status(200).json(finalResponse);
     } 
     
-    console.warn(`[${videoId}] 互換性最優先の分離トラックペア（H.264/AAC/MP4）は見つからなかったぜ。`);
+    console.warn(`[${videoId}] 互換性最優先の分離トラックペア（H.264/AACまたはOpus）は見つからなかったぜ。`);
     
+    // 3. 代替の複合トラックのフィルタリング
     const combinedTrack = formats
         .filter(f => f.trackType === 'combined')
         .filter(f => {
+            // 複合トラックは、最も互換性の高いMP4コンテナに限定
             return f.resolutionHeight > 0 && f.resolutionHeight <= 1080 && (f.container || '').toLowerCase() === 'mp4';
         })
         .sort((a, b) => {
@@ -268,7 +278,7 @@ app.get('/high/:id', async (req, res) => {
             success: true,
             videoId: resultVideoId,
             instance: instance,
-            message: "互換性最優先の分離トラックが見つからなかったから、代替として最も高画質な複合トラック(MP4/1080p以下)を返すぜ。",
+            message: "分離トラックが見つからなかったから、代替として最も高画質な複合トラック(MP4/1080p以下)を返すぜ。",
             combined: combinedTrack
         };
         return res.status(200).json(finalResponse);
@@ -278,7 +288,7 @@ app.get('/high/:id', async (req, res) => {
         success: false, 
         error: `動画ID ${videoId} のストリームは、タブレット互換性の高いトラックが一つも見つからなかったぜ。`,
         details: {
-            message: "H.264/AAC/MP4の分離トラック、または互換性の高い複合トラックが見つからなかった。",
+            message: "H.264動画トラックと、互換性の高い音声トラックのペア、または互換性の高い複合トラックが見つからなかった。",
             videoFound: !!bestVideo,
             audioFound: !!bestAudio,
             combinedFound: !!combinedTrack
