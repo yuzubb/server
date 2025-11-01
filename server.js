@@ -59,12 +59,8 @@ function normalizeFormat(format) {
 // ----------------------------------------------------
 // getAllFormats 関数 (キャッシュ処理を含む)
 // ----------------------------------------------------
-/**
- * Invidiousインスタンスを巡回し、利用可能な全てのフォーマットを正規化して取得する。
- */
 async function getAllFormats(videoId) {
 
-    // 1. キャッシュの確認と有効期限チェック
     const cachedItem = videoCache[videoId];
     if (cachedItem && (Date.now() < cachedItem.timestamp + CACHE_TTL)) {
         console.log(`[${videoId}] キャッシュから取得したよ。`);
@@ -78,7 +74,7 @@ async function getAllFormats(videoId) {
             console.log(`[${videoId}] インスタンス試すよ: ${baseUrl}`);
             
             const controller = new AbortController();
-            const timeoutId = setTimeout(() => controller.abort(), 7000); // 7秒のタイムアウト
+            const timeoutId = setTimeout(() => controller.abort(), 7000);
 
             const response = await fetch(apiUrl, { signal: controller.signal });
             clearTimeout(timeoutId);
@@ -97,7 +93,6 @@ async function getAllFormats(videoId) {
                     ...(data.formatStreams || [])
                 ];
 
-                // 全てのフォーマットを正規化
                 const normalizedFormats = allFormats
                     .map(normalizeFormat)
                     .filter(f => f.trackType !== 'unknown');
@@ -109,12 +104,11 @@ async function getAllFormats(videoId) {
                         success: true,
                         videoId: videoId,
                         instance: baseUrl,
-                        title: data.title, // キャッシュ用にタイトルとサムネイルを取得
+                        title: data.title,
                         thumbnail: (data.videoThumbnails || []).find(t => t.quality === 'medium') || (data.videoThumbnails || [])[0],
                         formats: normalizedFormats
                     };
 
-                    // 2. キャッシュに保存
                     videoCache[videoId] = {
                         timestamp: Date.now(),
                         data: result
@@ -133,11 +127,11 @@ async function getAllFormats(videoId) {
         }
     }
 
-    return null; // 全てのインスタンスで失敗
+    return null;
 }
 
 // ----------------------------------------------------
-// /stream/:id エンドポイント 
+// /stream/:id エンドポイント (変更なし)
 // ----------------------------------------------------
 app.get('/stream/:id', async (req, res) => {
     const videoId = req.params.id;
@@ -190,7 +184,7 @@ app.get('/stream/:id', async (req, res) => {
 });
 
 // ----------------------------------------------------
-// /high/:id エンドポイント (VP9、特にitag399を厳格に除外)
+// /high/:id エンドポイント (itag 399/VP9を厳格に除外)
 // ----------------------------------------------------
 app.get('/high/:id', async (req, res) => {
     const videoId = req.params.id;
@@ -216,16 +210,21 @@ app.get('/high/:id', async (req, res) => {
     const videoTracks = formats
         .filter(f => f.trackType === 'video')
         .filter(f => {
-            // ⭐ フィルタリング強化: 
-            // 1. 1080p以下に限定 (2160p=itag399を除外)
+            // ⭐ フィルタリング強化:
+            
+            // 1. itag 399を明示的に除外 (報告されたデータが1080pでも確実に避けるため)
+            if (f.itag === '399') {
+                console.log(`[${f.videoId}] itag 399 を明示的に除外しました。`);
+                return false;
+            }
+
+            // 2. 1080p以下に限定 (2160pなど高解像度を除外)
             if (f.resolutionHeight > 1080 || f.resolutionHeight === 0) return false;
 
-            // 2. タブレット互換性のため、VP9コーデックを明示的に除外
+            // 3. VP9コーデックを明示的に除外 (互換性の低い1080p VP9/itag248などを除外)
             const encoding = (f.encoding || '').toLowerCase();
-            if (encoding.includes('vp9')) {
-                // itag399 (2160p/VP9) は既に1080pフィルタで除外されているが、
-                // itag248 (1080p/VP9) などもここで除外される
-                console.log(`[${f.videoId}] VP9トラック (${f.resolutionHeight}p) を互換性のため除外しました。`);
+            if (encoding.includes('vp9') || f.container === 'webm') {
+                console.log(`[${f.videoId}] VP9/WebMトラック (${f.resolutionHeight}p) を互換性のため除外しました。`);
                 return false;
             }
 
@@ -303,7 +302,7 @@ app.get('/high/:id', async (req, res) => {
 });
 
 // ----------------------------------------------------
-// /api/cache エンドポイントの追加 
+// /api/cache エンドポイントの追加 (変更なし)
 // ----------------------------------------------------
 app.get('/api/cache', (req, res) => {
     const cachedVideos = Object.keys(videoCache).map(videoId => {
