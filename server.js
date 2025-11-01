@@ -23,7 +23,6 @@ const INVIDIOUS_INSTANCES = [
 
 /**
  * Invidiousレスポンスのフォーマットオブジェクトを、より汎用的な構造に変換し、トラックタイプを判別する。
- * (中略: normalizeFormat 関数は変更なし)
  */
 function normalizeFormat(format) {
     const hasResolution = !!format.resolution || !!format.qualityLabel;
@@ -191,7 +190,7 @@ app.get('/stream/:id', async (req, res) => {
 });
 
 // ----------------------------------------------------
-// /high/:id エンドポイント (最高画質分離を優先、1080p制限、H.264優先)
+// /high/:id エンドポイント (VP9、特にitag399を厳格に除外)
 // ----------------------------------------------------
 app.get('/high/:id', async (req, res) => {
     const videoId = req.params.id;
@@ -213,12 +212,25 @@ app.get('/high/:id', async (req, res) => {
 
     const { formats, videoId: resultVideoId, instance } = result;
     
-    // 1. 分離トラック (Video/Audio) の厳選と1080p制限
+    // 1. 分離トラック (Video) の厳選とフィルタリング
     const videoTracks = formats
         .filter(f => f.trackType === 'video')
         .filter(f => {
-            // ⭐ 1080p制限フィルタ: 1080p以下に限定。itag399 (4K) はここで除外される。
-            return f.resolutionHeight > 0 && f.resolutionHeight <= 1080;
+            // ⭐ フィルタリング強化: 
+            // 1. 1080p以下に限定 (2160p=itag399を除外)
+            if (f.resolutionHeight > 1080 || f.resolutionHeight === 0) return false;
+
+            // 2. タブレット互換性のため、VP9コーデックを明示的に除外
+            const encoding = (f.encoding || '').toLowerCase();
+            if (encoding.includes('vp9')) {
+                // itag399 (2160p/VP9) は既に1080pフィルタで除外されているが、
+                // itag248 (1080p/VP9) などもここで除外される
+                console.log(`[${f.videoId}] VP9トラック (${f.resolutionHeight}p) を互換性のため除外しました。`);
+                return false;
+            }
+
+            // H.264やHEVCの1080p以下のみが残る
+            return true;
         })
         .sort((a, b) => {
             // 1. 解像度の高いものを優先
@@ -226,15 +238,7 @@ app.get('/high/:id', async (req, res) => {
                 return b.resolutionHeight - a.resolutionHeight; 
             }
             
-            // ⭐ 2. 解像度が同じ場合、互換性の高いH.264を優先 (h264 > vp9)
-            // これにより、同じ1080pでもVP9よりH.264が選ばれる。
-            const isAH264 = (a.encoding || '').toLowerCase().includes('h.264') || (a.encoding || '').toLowerCase().includes('avc');
-            const isBH264 = (b.encoding || '').toLowerCase().includes('h.264') || (b.encoding || '').toLowerCase().includes('avc');
-            
-            if (isAH264 && !isBH264) return -1;
-            if (!isAH264 && isBH264) return 1;
-
-            // 3. エンコーディングも同じ場合、itagの降順で代用
+            // 2. エンコーディングが同じ場合、itagの降順で代用 (品質の微差を考慮)
             return parseInt(b.itag) - parseInt(a.itag);
         });
 
@@ -253,7 +257,7 @@ app.get('/high/:id', async (req, res) => {
             success: true,
             videoId: resultVideoId,
             instance: instance,
-            message: "最高画質(1080p以下, H.264優先)と最高音質の分離トラックを1つずつ厳選しました。これらを結合して再生してください。",
+            message: "最高画質(1080p以下, H.264/HEVC優先)と最高音質の分離トラックを1つずつ厳選しました。これらを結合して再生してください。",
             video: bestVideo, 
             audio: bestAudio  
         };
@@ -299,7 +303,7 @@ app.get('/high/:id', async (req, res) => {
 });
 
 // ----------------------------------------------------
-// /api/cache エンドポイントの追加 (変更なし)
+// /api/cache エンドポイントの追加 
 // ----------------------------------------------------
 app.get('/api/cache', (req, res) => {
     const cachedVideos = Object.keys(videoCache).map(videoId => {
