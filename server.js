@@ -42,8 +42,8 @@ function normalizeFormat(format) {
         qualityLabel: format.qualityLabel || format.quality,
         resolution: format.resolution,
         resolutionHeight: height,
-        container: format.container,
-        encoding: format.encoding,
+        container: format.container ? format.container.toLowerCase() : null,
+        encoding: format.encoding ? format.encoding.toLowerCase() : null,
         trackType: trackType,
         audioQuality: format.audioQuality
     };
@@ -146,7 +146,7 @@ app.get('/stream/:id', async (req, res) => {
 
     if (combinedTracks.length > 0) {
         bestCombined = combinedTracks.sort((a, b) => {
-            return b.resolutionHeight - a.resolutionHeight; // 複合トラックは高解像度を優先
+            return b.resolutionHeight - a.resolutionHeight; 
         })[0];
     }
 
@@ -189,53 +189,75 @@ app.get('/high/:id', async (req, res) => {
 
     const { formats, videoId: resultVideoId, instance } = result;
     
-    // 1. 動画トラック (H.264とVP9を許可し、H.264を優先)
+    // 1. 動画トラック (指定された高画質コーデックを優先)
     const videoTracks = formats
         .filter(f => f.trackType === 'video')
         .filter(f => {
+            // 4K(2160p)以上は除外、1080p以下に限定
             if (f.resolutionHeight > 1080 || f.resolutionHeight === 0) return false;
 
-            const encoding = (f.encoding || '').toLowerCase();
+            const encoding = f.encoding || '';
+            const container = f.container || '';
             
-            if (encoding.includes('avc') || encoding.includes('h.264') || encoding.includes('vp9')) {
+            // AV1, VP9, H.264のいずれかを含むトラックのみを許可
+            if (encoding.includes('av01') || encoding.includes('vp9') || encoding.includes('avc') || encoding.includes('h.264')) {
                 return true;
             }
 
             return false;
         })
         .sort((a, b) => {
+            // 1. 解像度の高いものを優先
             if (a.resolutionHeight !== b.resolutionHeight) {
                 return b.resolutionHeight - a.resolutionHeight; 
             }
             
-            const aIsH264 = (a.encoding || '').toLowerCase().includes('avc') || (a.encoding || '').toLowerCase().includes('h.264');
-            const bIsH264 = (b.encoding || '').toLowerCase().includes('avc') || (b.encoding || '').toLowerCase().includes('h.264');
+            // 2. コーデックの優先度を数値で定義
+            const getCodecPriority = (f) => {
+                const encoding = f.encoding || '';
+                if (encoding.includes('av01')) return 4; // AV1を最優先
+                if (encoding.includes('vp9')) {
+                    // VP9の中でも60fps(itag399, 299, 308など)をさらに優先
+                    if (f.qualityLabel && f.qualityLabel.includes('60fps')) return 3; 
+                    return 2; // VP9標準
+                }
+                if (encoding.includes('avc') || encoding.includes('h.264')) return 1; // H.264は最低限
+                return 0;
+            };
 
-            if (aIsH264 && !bIsH264) return -1;
-            if (!aIsH264 && bIsH264) return 1;
+            const priorityA = getCodecPriority(a);
+            const priorityB = getCodecPriority(b);
 
+            if (priorityA !== priorityB) {
+                return priorityB - priorityA; // 優先度の高いものを先頭に
+            }
+
+            // 3. それ以外はitagの降順で代用
             return parseInt(b.itag) - parseInt(a.itag);
         });
 
-    // 2. 音声トラック (AACとOpusを許可し、AACを優先)
+    // 2. 音声トラック (Opusを優先)
     const audioTracks = formats
         .filter(f => f.trackType === 'audio')
         .filter(f => {
-            const encoding = (f.encoding || '').toLowerCase();
+            const encoding = f.encoding || '';
             
-            if (encoding.includes('aac') || encoding.includes('opus')) {
+            // OpusまたはAACを許可
+            if (encoding.includes('opus') || encoding.includes('aac')) {
                 return true;
             }
 
             return false;
         })
         .sort((a, b) => {
-            const aIsAAC = (a.encoding || '').toLowerCase().includes('aac');
-            const bIsAAC = (b.encoding || '').toLowerCase().includes('aac');
+            const aIsOpus = (a.encoding || '').includes('opus');
+            const bIsOpus = (b.encoding || '').includes('opus');
+            
+            // 1. OpusをAACより優先
+            if (aIsOpus && !bIsOpus) return -1;
+            if (!aIsOpus && bIsOpus) return 1;
 
-            if (aIsAAC && !bIsAAC) return -1;
-            if (!aIsAAC && bIsAAC) return 1;
-
+            // 2. それ以外はitagの降順で代用 (品質の高いものを優先)
             return parseInt(b.itag) - parseInt(a.itag);
         });
     
@@ -243,8 +265,8 @@ app.get('/high/:id', async (req, res) => {
     const bestAudio = audioTracks[0] || null;
 
     if (bestVideo && bestAudio) {
-        const videoType = (bestVideo.encoding || '').includes('vp9') ? 'VP9/WebM' : 'H.264/MP4';
-        const audioType = (bestAudio.encoding || '').includes('opus') ? 'Opus/WebM' : 'AAC/MP4';
+        const videoType = `${(bestVideo.encoding || '').toUpperCase().split(/[_-]/)[0]}/${(bestVideo.container || '').toUpperCase()}`;
+        const audioType = `${(bestAudio.encoding || '').toUpperCase()}/${(bestAudio.container || '').toUpperCase()}`;
         
         console.log(`[${videoId}] 動画：${bestVideo.itag} (${videoType})、音声：${bestAudio.itag} (${audioType})を選んだぜ。`);
 
@@ -252,14 +274,14 @@ app.get('/high/:id', async (req, res) => {
             success: true,
             videoId: resultVideoId,
             instance: instance,
-            message: `互換性と画質を考慮し、最も適した分離トラックのペア（${videoType} + ${audioType}）を選んだぜ。`,
+            message: `指定されたコーデック/コンテナを優先し、高画質な分離トラックのペア（${videoType} + ${audioType}）を選んだぜ。`,
             video: bestVideo, 
             audio: bestAudio  
         };
         return res.status(200).json(finalResponse);
     } 
     
-    console.warn(`[${videoId}] 分離トラックペア（H.264/VP9とAAC/Opus）が見つからなかったぜ。複合トラックを必ず探す！`);
+    console.warn(`[${videoId}] 分離トラックペア（指定コーデック）が見つからなかったぜ。複合トラックを探す。`);
     
     // 3. 代替の複合トラックのフィルタリング (制約を緩め、必ずどれか見つける)
     const combinedTrack = formats
@@ -269,14 +291,14 @@ app.get('/high/:id', async (req, res) => {
             if (a.resolutionHeight !== b.resolutionHeight) {
                 return b.resolutionHeight - a.resolutionHeight; 
             }
-            // 2. MP4コンテナをWebMコンテナより優先
+            // 2. MP4コンテナをWebMコンテナより優先 (複合トラックはMP4の方が安定しやすい傾向があるため)
             const aIsMp4 = (a.container || '').toLowerCase() === 'mp4';
             const bIsMp4 = (b.container || '').toLowerCase() === 'mp4';
             if (aIsMp4 && !bIsMp4) return -1;
             if (!aIsMp4 && bIsMp4) return 1;
             
             return parseInt(b.itag) - parseInt(a.itag);
-        })[0] || null; // 最も良い複合トラックを一つ選ぶ
+        })[0] || null;
 
     if (combinedTrack) {
         const containerType = (combinedTrack.container || '').toUpperCase();
@@ -286,7 +308,7 @@ app.get('/high/:id', async (req, res) => {
             success: true,
             videoId: resultVideoId,
             instance: instance,
-            message: `分離トラックの再生が不安定だった場合に備えて、代替として最も高画質な複合トラック(${containerType}/${resolution}p)を返すぜ。`,
+            message: `分離トラックが見つからなかった場合に備えて、代替として最も高画質な複合トラック(${containerType}/${resolution}p)を返すぜ。`,
             combined: combinedTrack
         };
         return res.status(200).json(finalResponse);
@@ -296,7 +318,7 @@ app.get('/high/:id', async (req, res) => {
         success: false, 
         error: `動画ID ${videoId} のストリームは、タブレットで再生できるトラックが本当に一つも見つからなかったぜ。`,
         details: {
-            message: "H.264/VP9分離トラック、AAC/Opus音声トラック、複合トラックのいずれも見つからなかった。",
+            message: "分離トラック（AV1/VP9/H.264 + Opus/AAC）のペア、または複合トラックのいずれも見つからなかった。",
             videoFound: !!bestVideo,
             audioFound: !!bestAudio,
             combinedFound: !!combinedTrack
