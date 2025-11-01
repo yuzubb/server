@@ -4,7 +4,10 @@ import express from 'express';
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// キャッシュ関連の定義を削除
+// ⭐ キャッシュストアの定義
+const videoCache = {};
+// ⭐ キャッシュの有効期限を4時間 (ミリ秒) に設定
+const CACHE_TTL = 4 * 60 * 60 * 1000; // 4 hours in milliseconds
 
 const INVIDIOUS_INSTANCES = [
     'https://invidious.f5.si',
@@ -18,31 +21,28 @@ const INVIDIOUS_INSTANCES = [
     'https://lekker.gay',
 ];
 
-// ⭐ 廃止: TARGET_ITAGS_ALL_OTHER
-// ⭐ 廃止: TARGET_ITAGS_HIGH
-
 /**
  * Invidiousレスポンスのフォーマットオブジェクトを、より汎用的な構造に変換し、トラックタイプを判別する。
  * @param {object} format - Invidious APIから取得した単一のフォーマットオブジェクト
  * @returns {object} 整理されたフォーマット情報
  */
 function normalizeFormat(format) {
-    const isAudioOnly = !!format.audioQuality && !format.resolution;
-    const isVideoOnly = !!format.resolution && !format.audioQuality;
-    const isCombined = !!format.resolution && !!format.audioQuality; // 解像度と音声品質の両方があれば複合と見なす
+    // スキーマに基づき、resolutionとaudioQualityの有無で判別
+    const hasResolution = !!format.resolution || !!format.qualityLabel;
+    const hasAudioQuality = !!format.audioQuality || !!(format.quality && format.quality.includes('audio'));
 
     let trackType = 'unknown';
-    if (isAudioOnly) {
-        trackType = 'audio';
-    } else if (isVideoOnly) {
-        trackType = 'video';
-    } else if (isCombined) {
+    if (hasResolution && hasAudioQuality) {
         trackType = 'combined';
+    } else if (hasResolution && !hasAudioQuality) {
+        trackType = 'video';
+    } else if (!hasResolution && hasAudioQuality) {
+        trackType = 'audio';
     }
 
     const resolution = format.resolution || (format.qualityLabel ? format.qualityLabel.match(/(\d+p)/)?.[1] : null);
     
-    // 解像度の高さを数値で取得 (例: '1080p' -> 1080, '720p' -> 720)
+    // 解像度の高さを数値で取得 (例: '1080p' -> 1080)
     const height = resolution ? parseInt(resolution.replace('p', '')) : 0;
 
     return {
@@ -60,12 +60,19 @@ function normalizeFormat(format) {
 
 
 // ----------------------------------------------------
-// getAllFormats 関数 (itagに依存しないように変更)
+// getAllFormats 関数 (キャッシュ処理を追加)
 // ----------------------------------------------------
 /**
  * Invidiousインスタンスを巡回し、利用可能な全てのフォーマットを正規化して取得する。
  */
 async function getAllFormats(videoId) {
+
+    // ⭐ 1. キャッシュの確認と有効期限チェック
+    const cachedItem = videoCache[videoId];
+    if (cachedItem && (Date.now() < cachedItem.timestamp + CACHE_TTL)) {
+        console.log(`[${videoId}] キャッシュから取得したよ。`);
+        return cachedItem.data;
+    }
 
     for (const baseUrl of INVIDIOUS_INSTANCES) {
         const apiUrl = `${baseUrl}/api/v1/videos/${videoId}`;
@@ -101,12 +108,23 @@ async function getAllFormats(videoId) {
                 
                 if (normalizedFormats.length > 0) {
                     console.log(`[${videoId}] やった！${baseUrl}で${normalizedFormats.length}個のフォーマットを見つけたよ`);
-                    return {
+                    
+                    const result = {
                         success: true,
                         videoId: videoId,
                         instance: baseUrl,
+                        title: data.title, // キャッシュ用にタイトルとサムネイルを取得
+                        thumbnail: (data.videoThumbnails || []).find(t => t.quality === 'medium') || (data.videoThumbnails || [])[0],
                         formats: normalizedFormats
                     };
+
+                    // ⭐ 2. キャッシュに保存
+                    videoCache[videoId] = {
+                        timestamp: Date.now(),
+                        data: result
+                    };
+                    
+                    return result;
                 } else {
                     console.log(`[${videoId}] ${baseUrl}には有効なフォーマットが無かったわ。次行くわ`);
                 }
@@ -145,39 +163,38 @@ app.get('/stream/:id', async (req, res) => {
 
     const { formats } = result;
     
-    // ⭐ 互換性優先ロジック:
-    // 1. 複合トラック ('combined') の中から、最も広く互換性のある (例: 360p) トラックを探す。
+    // 互換性優先ロジック:
     const combinedTracks = formats.filter(f => f.trackType === 'combined');
     
     let bestCombined = null;
 
     if (combinedTracks.length > 0) {
-        // 複合トラックを、解像度が低い順にソート（互換性優先のため）
         bestCombined = combinedTracks.sort((a, b) => {
-            // 解像度の数値で昇順ソート (360p, 480p, 720p...)
             return a.resolutionHeight - b.resolutionHeight;
-        }).find(f => f.resolutionHeight >= 360) || combinedTracks[0]; // 360p以上を優先、なければ最小のものを採用
+        }).find(f => f.resolutionHeight >= 360) || combinedTracks[0];
     }
 
     if (bestCombined) {
-        // 互換性の高い複合トラックが見つかったら、それだけを返す
         return res.status(200).json({
-            ...result,
+            success: result.success,
+            videoId: result.videoId,
+            instance: result.instance,
             message: "互換性を最優先し、複合トラック（360p付近）を厳選しました。",
             formats: [bestCombined]
         });
     }
 
-    // 複合トラックが見つからない場合は、全てのトラックを返す（フォールバック）
     return res.status(200).json({
-        ...result,
+        success: result.success,
+        videoId: result.videoId,
+        instance: result.instance,
         message: "複合トラックが見つからなかったため、利用可能な全てのトラックを返します。",
         formats: formats
     });
 });
 
 // ----------------------------------------------------
-// /high/:id エンドポイント (最高画質分離を優先、1080p制限)
+// /high/:id エンドポイント (最高画質分離を優先、1080p制限、H.264優先)
 // ----------------------------------------------------
 app.get('/high/:id', async (req, res) => {
     const videoId = req.params.id;
@@ -203,23 +220,29 @@ app.get('/high/:id', async (req, res) => {
     const videoTracks = formats
         .filter(f => f.trackType === 'video')
         .filter(f => {
-            // ⭐ 1080p制限フィルター: 縦解像度が1080ピクセル以下であることを確認
+            // 1080p制限フィルター
             return f.resolutionHeight > 0 && f.resolutionHeight <= 1080;
         })
         .sort((a, b) => {
-            // 解像度の高いもの（1080pが最高）を優先的に選択
+            // 1. 解像度の高いものを優先
             if (a.resolutionHeight !== b.resolutionHeight) {
                 return b.resolutionHeight - a.resolutionHeight; 
             }
-            // 解像度が同じなら、エンコーディング(VP9/h264)やitagで優先度を付けるのが理想だが、ここではitagの降順で代用
+            
+            // 2. 解像度が同じ場合、互換性の高いH.264を優先 (h264 > vp9)
+            const isAH264 = (a.encoding || '').toLowerCase().includes('h.264') || (a.encoding || '').toLowerCase().includes('avc');
+            const isBH264 = (b.encoding || '').toLowerCase().includes('h.264') || (b.encoding || '').toLowerCase().includes('avc');
+            
+            if (isAH264 && !isBH264) return -1;
+            if (!isAH264 && isBH264) return 1;
+
+            // 3. エンコーディングも同じ場合、itagの降順で代用
             return parseInt(b.itag) - parseInt(a.itag);
         });
 
     const audioTracks = formats
         .filter(f => f.trackType === 'audio')
         .sort((a, b) => {
-            // 音声品質 (例: "AUDIO_QUALITY_HIGH") や itagでソート（高品質なものを優先）
-            // 簡略化のため、ここではitagの降順でソート
             return parseInt(b.itag) - parseInt(a.itag);
         });
     
@@ -232,7 +255,7 @@ app.get('/high/:id', async (req, res) => {
             success: true,
             videoId: resultVideoId,
             instance: instance,
-            message: "最高画質(1080p以下)と最高音質の分離トラックを1つずつ厳選しました。これらを結合して再生してください。",
+            message: "最高画質(1080p以下, H.264優先)と最高音質の分離トラックを1つずつ厳選しました。これらを結合して再生してください。",
             video: bestVideo, 
             audio: bestAudio  
         };
@@ -276,10 +299,81 @@ app.get('/high/:id', async (req, res) => {
         }
     });
 });
+
+// ----------------------------------------------------
+// ⭐ /api/cache エンドポイントの追加
+// ----------------------------------------------------
+app.get('/api/cache', (req, res) => {
+    const cachedVideos = Object.keys(videoCache).map(videoId => {
+        const item = videoCache[videoId];
+        const expiresAt = item.timestamp + CACHE_TTL;
+        const remainingTimeSeconds = Math.max(0, Math.floor((expiresAt - Date.now()) / 1000));
+        
+        // キャッシュアイテムから必要な情報を取り出す
+        const { title, thumbnail, instance } = item.data;
+
+        return {
+            videoId: videoId,
+            title: title || 'タイトル不明',
+            instance: instance,
+            thumbnailUrl: thumbnail ? thumbnail.url : 'サムネイルなし',
+            cachedAt: new Date(item.timestamp).toISOString(),
+            expiresInSeconds: remainingTimeSeconds,
+            // 簡易的に表示用HTMLタグを生成
+            html: `
+                <div>
+                    <img src="${thumbnail ? thumbnail.url : ''}" alt="サムネイル" style="width:120px; height:auto; margin-right: 10px;">
+                    <div>
+                        <strong>${title || 'タイトル不明'}</strong> (${videoId})<br>
+                        キャッシュインスタンス: ${instance}<br>
+                        有効期限まで: ${Math.floor(remainingTimeSeconds / 60)}分${remainingTimeSeconds % 60}秒
+                    </div>
+                </div>
+                <hr>`
+        };
+    });
+
+    const htmlOutput = `
+        <!DOCTYPE html>
+        <html lang="ja">
+        <head>
+            <meta charset="UTF-8">
+            <title>Invidious Cache List</title>
+            <style>
+                body { font-family: sans-serif; line-height: 1.6; padding: 20px; }
+                h1 { border-bottom: 2px solid #ccc; padding-bottom: 10px; }
+                .cache-item { display: flex; align-items: center; margin-bottom: 20px; border: 1px solid #eee; padding: 10px; border-radius: 5px; }
+                .cache-item img { margin-right: 15px; border-radius: 3px; }
+                .cache-info { font-size: 0.9em; }
+                .cache-count { margin-bottom: 15px; font-weight: bold; }
+            </style>
+        </head>
+        <body>
+            <h1>📦 Invidious Proxy キャッシュリスト</h1>
+            <div class="cache-count">合計キャッシュ数: ${cachedVideos.length}</div>
+            ${cachedVideos.map(item => `
+                <div class="cache-item">
+                    <img src="${item.thumbnailUrl}" alt="Thumbnail" style="width:120px;">
+                    <div class="cache-info">
+                        <strong>${item.title}</strong> (${item.videoId})<br>
+                        キャッシュ元: <a href="${item.instance}" target="_blank">${new URL(item.instance).hostname}</a><br>
+                        キャッシュ日時: ${new Date(item.cachedAt).toLocaleString()}<br>
+                        有効期限まで: <span style="color:${item.expiresInSeconds < 600 ? 'red' : 'green'};">${Math.floor(item.expiresInSeconds / 3600)}時間${Math.floor((item.expiresInSeconds % 3600) / 60)}分${item.expiresInSeconds % 60}秒</span>
+                        <br><a href="/high/${item.videoId}" target="_blank">/high/${item.videoId}</a>
+                    </div>
+                </div>
+            `).join('')}
+        </body>
+        </html>
+    `;
+
+    res.status(200).send(htmlOutput);
+});
+
 // ------------------------------------------
 
 app.get('/', (req, res) => {
-    res.status(200).send('Invidious Proxyは動いてるよ。動画データが欲しいなら /stream/:id (互換性重視) または /high/:id (最高画質/音質の分離を厳選) を使ってね。');
+    res.status(200).send('Invidious Proxyは動いてるよ。動画データが欲しいなら /stream/:id (互換性重視) または /high/:id (最高画質/音質の分離を厳選) を使ってね。<br>キャッシュ一覧は <a href="/api/cache">/api/cache</a> で確認できるよ。');
 });
 
 
