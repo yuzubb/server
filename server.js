@@ -218,48 +218,45 @@ app.get('/high/:id', async (req, res) => {
             return resMatch ? parseInt(resMatch[1]) : 0;
         };
 
-        // 2. 最高画質のmanifestを見つけるロジック
-        let bestFormat = null;
+        // 2. m3u8 manifestを持つ最高画質のmanifestを見つけるロジック
+        // manifestフィールドが存在し、かつ値が.m3u8を含むものをHLSストリームとしてフィルタリング
+        const manifestFormats = formats.filter(f => f.manifest && f.manifest.includes('.m3u8')); 
+        
+        if (manifestFormats.length === 0) {
+             return res.status(404).json({ 
+                success: false, 
+                error: `動画ID ${videoId} のHLS (m3u8) マニフェストは見つかりませんでした。` 
+            });
+        }
+        
+        let bestManifestFormat = null;
         let maxResolutionHeight = -1;
         
-        // vcodecが存在するもの（動画トラックまたは複合トラック）のみを対象とする
-        const videoFormats = formats.filter(f => f.vcodec && f.vcodec !== 'none');
-
-        for (const format of videoFormats) {
+        // 最高画質のmanifest URLを持つフォーマットを選択
+        for (const format of manifestFormats) {
             const height = getResolutionHeight(format);
             
             // 最高解像度のトラックを選ぶ
             if (height > maxResolutionHeight) {
                 maxResolutionHeight = height;
-                bestFormat = format;
+                bestManifestFormat = format;
             }
         }
         
-        if (bestFormat) {
-            // 最高画質のmanifestをJSON形式で返す
-            console.log(`[${videoId}] 最高画質のトラック(${bestFormat.resolution || bestFormat.qualityLabel})を選んだぜ。`);
-            return res.status(200).json(bestFormat);
-        }
-
-        // 動画トラックが見つからなかった場合のフォールバックとして、最高音質の音声トラックを探す
-        const audioOnlyFormats = formats
-            .filter(f => !f.vcodec || f.vcodec === 'none')
-            .sort((a, b) => {
-                // Opusを優先し、次にitagの降順で並べる
-                const aIsOpus = (a.acodec || '').includes('opus');
-                const bIsOpus = (b.acodec || '').includes('opus');
-                
-                if (aIsOpus && !bIsOpus) return -1;
-                if (!aIsOpus && bIsOpus) return 1;
-                
-                return parseInt(b.itag) - parseInt(a.itag);
+        if (bestManifestFormat) {
+            // 最高画質のmanifest URLをJSONオブジェクトの一部として返す
+            const m3u8Url = bestManifestFormat.manifest;
+            
+            console.log(`[${videoId}] 最高画質のm3u8 URL (${maxResolutionHeight}p) を選んだぜ。`);
+            
+            return res.status(200).json({
+                success: true,
+                videoId: videoId,
+                resolution: bestManifestFormat.resolution || `${maxResolutionHeight}p`,
+                m3u8Url: m3u8Url,
+                message: "最高画質のHLS (m3u8) マニフェストURLを厳選したぜ。"
             });
-        
-        if (audioOnlyFormats.length > 0) {
-             console.log(`[${videoId}] 動画トラックが見つからなかったため、最高音質の音声トラック (${audioOnlyFormats[0].itag}) を返します。`);
-             return res.status(200).json(audioOnlyFormats[0]);
         }
-
 
         return res.status(404).json({ 
             success: false, 
