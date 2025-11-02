@@ -18,8 +18,6 @@ const INVIDIOUS_INSTANCES = [
     'https://lekker.gay',
 ];
 
-// --- 💡 追加: キャッシュクリーンアップ機能 ---
-
 /**
  * 期限切れ（4時間以上経過）のキャッシュアイテムをvideoCacheオブジェクトから物理的に削除します。
  */
@@ -46,7 +44,6 @@ function cleanupCache() {
 const CLEANUP_INTERVAL = 30 * 60 * 1000; 
 setInterval(cleanupCache, CLEANUP_INTERVAL); 
 
-// ---------------------------------------------
 
 function normalizeFormat(format) {
     const hasResolution = !!format.resolution || !!format.qualityLabel;
@@ -124,6 +121,7 @@ async function getAllFormats(videoId) {
                         videoId: videoId,
                         instance: baseUrl,
                         title: data.title,
+                        // Invidiousのサムネイルデータは保持するが、/api/cacheでは利用しない
                         thumbnail: (data.videoThumbnails || []).find(t => t.quality === 'medium') || (data.videoThumbnails || [])[0],
                         formats: normalizedFormats
                     };
@@ -291,10 +289,8 @@ app.get('/high/:id', async (req, res) => {
     }
 });
 
-// /api/stream/:id/type2 エンドポイントは、今回の機能統合により削除しました。
-
 app.get('/api/cache', (req, res) => {
-    // 💡 修正点: キャッシュの一覧表示前に、手動でクリーンアップを実行
+    // キャッシュの一覧表示前にクリーンアップを実行
     cleanupCache(); 
     
     const cachedVideos = Object.keys(videoCache).map(videoId => {
@@ -302,13 +298,19 @@ app.get('/api/cache', (req, res) => {
         const expiresAt = item.timestamp + CACHE_TTL;
         const remainingTimeSeconds = Math.max(0, Math.floor((expiresAt - Date.now()) / 1000));
         
-        const { title, thumbnail, instance } = item.data;
+        // 変更: thumbnailの代わりにvideoIdを使ってURLを構築
+        const { title, instance } = item.data;
+        
+        // 💡 ユーザー要望に基づくYouTubeのmaxresdefault.jpg URLを構築
+        const youtubeThumbnailUrl = `http://img.youtube.com/vi/${videoId}/maxresdefault.jpg`;
+
 
         return {
             videoId: videoId,
             title: title || 'タイトル不明',
             instance: instance,
-            thumbnailUrl: thumbnail ? thumbnail.url : 'サムネイルなし',
+            // 構築したYouTubeのURLを使用
+            thumbnailUrl: youtubeThumbnailUrl, 
             cachedAt: new Date(item.timestamp).toISOString(),
             expiresInSeconds: remainingTimeSeconds,
         };
@@ -335,7 +337,7 @@ app.get('/api/cache', (req, res) => {
             <div class="cache-count">合計キャッシュ数: ${cachedVideos.length}</div>
             ${cachedVideos.map(item => `
                 <div class="cache-item">
-                    <img src="${item.thumbnailUrl}" alt="Thumbnail">
+                    <img src="${item.thumbnailUrl}" alt="Thumbnail" onerror="this.onerror=null;this.src='http://img.youtube.com/vi/${item.videoId}/mqdefault.jpg';">
                     <div class="cache-info">
                         <strong>${item.title}</strong> (${item.videoId})<br>
                         キャッシュ元: <a href="${item.instance}" target="_blank">${new URL(item.instance).hostname}</a><br>
