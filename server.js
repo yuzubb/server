@@ -5,10 +5,9 @@ const app = express.Router();
 const PORT = process.env.PORT || 3000;
 
 const videoCache = {};
-const CACHE_TTL = 4 * 60 * 60 * 1000;
+const CACHE_TTL = 4 * 60 * 60 * 1000; // 4時間
 
 const INVIDIOUS_INSTANCES = [
-    'https://invidious.f5.si',
     'https://yt.omada.cafe',
     'https://inv.perditum.com',
     'https://iv.melmac.space',
@@ -18,6 +17,36 @@ const INVIDIOUS_INSTANCES = [
     'https://inv.antopie.org',
     'https://lekker.gay',
 ];
+
+// --- 💡 追加: キャッシュクリーンアップ機能 ---
+
+/**
+ * 期限切れ（4時間以上経過）のキャッシュアイテムをvideoCacheオブジェクトから物理的に削除します。
+ */
+function cleanupCache() {
+    const now = Date.now();
+    let cleanedCount = 0;
+    
+    // videoCache内の全アイテムをチェック
+    for (const videoId in videoCache) {
+        const cachedItem = videoCache[videoId];
+        // 有効期限が切れているかチェック (現在時刻 >= 保存時刻 + TTL)
+        if (now >= cachedItem.timestamp + CACHE_TTL) {
+            delete videoCache[videoId]; // 物理削除
+            cleanedCount++;
+        }
+    }
+    
+    if (cleanedCount > 0) {
+        console.log(`[Cache Cleanup] 期限切れのキャッシュ ${cleanedCount} 件を削除したぜ。`);
+    }
+}
+
+// 30分ごとにクリーンアップ関数を実行
+const CLEANUP_INTERVAL = 30 * 60 * 1000; 
+setInterval(cleanupCache, CLEANUP_INTERVAL); 
+
+// ---------------------------------------------
 
 function normalizeFormat(format) {
     const hasResolution = !!format.resolution || !!format.qualityLabel;
@@ -265,6 +294,9 @@ app.get('/high/:id', async (req, res) => {
 // /api/stream/:id/type2 エンドポイントは、今回の機能統合により削除しました。
 
 app.get('/api/cache', (req, res) => {
+    // 💡 修正点: キャッシュの一覧表示前に、手動でクリーンアップを実行
+    cleanupCache(); 
+    
     const cachedVideos = Object.keys(videoCache).map(videoId => {
         const item = videoCache[videoId];
         const expiresAt = item.timestamp + CACHE_TTL;
