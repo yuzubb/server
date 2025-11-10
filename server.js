@@ -8,12 +8,16 @@ const videoCache = {};
 const CACHE_TTL = 4 * 60 * 60 * 1000; // 4時間
 
 const INVIDIOUS_INSTANCES = [
-    'https://iv.melmac.space',
-    'https://invidious.nikkosphere.com',
-    'https://iv.duti.dev',
-    'https://youtube.alt.tyil.nl',
-    'https://inv.antopie.org',
-    'https://lekker.gay',
+        'https://invidious.lunivers.trade/',
+        'https://yt.omada.cafe/',
+        'https://inv.perditum.com/',
+        'https://inv.perditum.com/',
+        'https://iv.melmac.space/', 
+        'https://invidious.nikkosphere.com/',
+        'https://iv.duti.dev/',
+        'https://youtube.alt.tyil.nl/',
+        'https://inv.antopie.org/',
+        'https://lekker.gay/',
 ];
 
 /**
